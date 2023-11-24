@@ -504,6 +504,9 @@ VOID ClearScreen(UINT32 colour)
         }
 #endif        
     }
+    // reset text position
+    gFBTxtCfg.CurrX = gFBTxtCfg.X0;
+    gFBTxtCfg.CurrY = gFBTxtCfg.Y0;
 }
 
 VOID ClearClipWindow(UINT32 colour)
