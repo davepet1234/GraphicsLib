@@ -84,9 +84,6 @@ error_exit:
 
 STATIC VOID init_globals(VOID)
 {
-    if (gCurrMode) {
-        return;
-    }
     gCurrMode = gGop->Mode->Mode;
     gFrameBuffer.Sig = RENBUF_SIG;
     gFrameBuffer.HorRes = gGop->Mode->Info->HorizontalResolution;
