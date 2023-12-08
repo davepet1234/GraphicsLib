@@ -65,13 +65,10 @@ STATIC TEXT_CONFIG                      gFBTxtCfg = { 0 };
 
 EFI_STATUS InitGraphics(VOID)
 {
-    EFI_STATUS Status;
-    if (!Initialised) {
-        Status = gBS->LocateProtocol(&gEfiGraphicsOutputProtocolGuid, NULL, (void**) &gGop);
-	    if (EFI_ERROR(Status)){
-            DbgPrint(DL_ERROR, "GOP missing!\n");
-            goto error_exit;
-        }
+    EFI_STATUS Status = gBS->LocateProtocol(&gEfiGraphicsOutputProtocolGuid, NULL, (void**) &gGop);
+    if (EFI_ERROR(Status)){
+        DbgPrint(DL_ERROR, "GOP missing!\n");
+        goto error_exit;
     }
     // remember original graphics mode as takes precidence over that required for text
     gOrigGfxMode = gGop->Mode->Mode;
