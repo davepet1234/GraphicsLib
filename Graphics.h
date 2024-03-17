@@ -78,10 +78,14 @@ VOID ClearScreen(UINT32 colour);
 VOID ClearClipWindow(UINT32 colour);
 
 VOID PutPixel(INT32 x, INT32 y, UINT32 colour);
+UINT32 GetPixel(INT32 x, INT32 y);
 VOID DrawHLine(INT32 x, INT32 y, INT32 width, UINT32 colour);
+VOID DrawHLine2(INT32 x0, INT32 x1, INT32 y, UINT32 colour);
 VOID DrawVLine(INT32 x, INT32 y, INT32 height, UINT32 colour);
 VOID DrawLine(INT32 x0, INT32 y0, INT32 x1, INT32 y1, UINT32 colour);
+VOID DrawTriangle(INT32 x0, INT32 y0, INT32 x1, INT32 y1, INT32 x2, INT32 y2, UINT32 colour);
 VOID DrawRectangle(INT32 x0, INT32 y0, INT32 x1, INT32 y1, UINT32 colour);
+VOID DrawFillTriangle(INT32 x0, INT32 y0, INT32 x1, INT32 y1, INT32 x2, INT32 y2, UINT32 colour);
 VOID DrawFillRectangle(INT32 x0, INT32 y0, INT32 x1, INT32 y1, UINT32 colour);
 VOID DrawCircle(INT32 xc, INT32 yc, INT32 r, UINT32 colour);
 VOID DrawFillCircle(INT32 xc, INT32 yc, INT32 r, UINT32 colour);

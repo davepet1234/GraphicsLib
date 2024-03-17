@@ -8,6 +8,7 @@
 */
 
 #define DEBUG_SUPPORT 0
+#define DEVELOPMENT_MODE 0
 
 #include <Uefi.h>
 #include <Library/UefiLib.h>
@@ -32,8 +33,16 @@
 #define CIRCLE_OPTIMISATION 1
 
 // When defined uses SetMem32() function to write to FB when possible
-#undef EDK2_MEM_FUNC
+#define EDK2_MEM_FUNC
 
+#if DEVELOPMENT_MODE
+#define DEV_WINDOW_WIDTH 200
+TEXT_CONFIG gDebugTxtCfg = {0};
+// Usage: DEVPRINT((&gDebugTxtCfg, L"Message\n"));
+#define DEVPRINT(x) GPrint x
+#else
+#define DEVPRINT(x)
+#endif
 
 // prototypes
 STATIC VOID init_globals(VOID);
@@ -63,6 +72,16 @@ STATIC RENDER_BUFFER                    *gCurrRenBuf = NULL;
 STATIC TEXT_CONFIG                      gFBTxtCfg = { 0 };
 #endif
 
+// macros
+#define SWAP(T, x, y) \
+    {                 \
+        T tmp = x;    \
+        x = y;        \
+        y = tmp;      \
+    }
+
+
+
 EFI_STATUS InitGraphics(VOID)
 {
     EFI_STATUS Status = gBS->LocateProtocol(&gEfiGraphicsOutputProtocolGuid, NULL, (void**) &gGop);
@@ -76,6 +95,11 @@ EFI_STATUS InitGraphics(VOID)
     init_globals();
     Initialised = TRUE;
 error_exit:
+#if DEVELOPMENT_MODE
+    SetClipping(0, 0, GetHorRes() - DEV_WINDOW_WIDTH - 1, GetVerRes() - 1);
+    CreateTextBox(&gDebugTxtCfg, GetHorRes() - DEV_WINDOW_WIDTH, 0, DEV_WINDOW_WIDTH, GetVerRes(), WHITE, BLUE, FONT7x14);
+    ClearTextBox(&gDebugTxtCfg);
+#endif
     return Status;
 }
 
@@ -159,7 +183,7 @@ EFI_STATUS SetDisplayResolution(UINT32 HorRes, UINT32 VerRes)
         if (ModeInfo->HorizontalResolution == HorRes && ModeInfo->VerticalResolution == VerRes) {
             return SetGraphicsMode(i);
         }
-	}
+    }
 
     return EFI_UNSUPPORTED;
 }
@@ -543,6 +567,20 @@ VOID PutPixel(INT32 x, INT32 y, UINT32 colour)
     *ptr = colour;
 }
 
+UINT32 GetPixel(INT32 x, INT32 y)
+{
+    if (!Initialised) {
+        return 0;
+    }
+    // clip pixel
+    if (x < gCurrRenBuf->ClipX0 || x > gCurrRenBuf->ClipX1 || y < gCurrRenBuf->ClipY0 || y > gCurrRenBuf->ClipY1) {
+        return 0;
+    }
+    // draw pixel
+    UINT32 *ptr = gCurrRenBuf->PixelData + x + (y * gCurrRenBuf->PixPerScnLn);
+    return *ptr;
+}
+
 VOID DrawHLine(INT32 x, INT32 y, INT32 width, UINT32 colour)
 {
     if (!Initialised){
@@ -569,6 +607,14 @@ VOID DrawHLine(INT32 x, INT32 y, INT32 width, UINT32 colour)
         *ptr++ = colour;
     }
 #endif    
+}
+
+VOID DrawHLine2(INT32 x0, INT32 x1, INT32 y, UINT32 colour)
+{
+    if (x1 < x0) {
+        SWAP(INT32, x0, x1);
+    }
+    DrawHLine(x0, y, ABS(x1-x0)+1, colour);
 }
 
 VOID DrawVLine(INT32 x, INT32 y, INT32 height, UINT32 colour)
@@ -650,31 +696,256 @@ STATIC VOID draw_line(INT32 x0, INT32 y0, INT32 x1, INT32 y1, UINT32 colour)
 {
     INT32 dx = ABS(x1 - x0);
     INT32 sx = x0 < x1 ? 1 : -1;
-    INT32 dy = ABS(y1 - y0);
+    INT32 dy = -ABS(y1 - y0);
     INT32 sy = y0 < y1 ? 1 : -1;
-    INT32 err = (dx > dy ? dx : -dy) / 2;
-       
+    INT32 error = dx + dy;
+
     UINT32 *ptr = gCurrRenBuf->PixelData + x0 + (y0 * gCurrRenBuf->PixPerScnLn);
 
-    while (1) {
+    while (TRUE) {
+
         *ptr = colour;
 
-        if (x0 == x1 && y0 == y1) {
-            break;
-        };
+        if (x0 == x1 && y0 == y1) break;
 
-        INT32 e2 = err + err;
+        INT32 e2 = 2 * error;
 
-        if (e2 > -dx) {
-            err -= dy;
+        if (e2 >= dy) {
+            if (x0 == x1) break;
+            error += dy;
             x0 += sx;
             ptr += sx;
         }
 
-        if (e2 < dy) {
-            err += dx;
+        if (e2 <= dx) {
+            if (y0 == y1) break;
+            error += dx;
             y0 += sy;
             ptr += (sy * (INT32)gCurrRenBuf->PixPerScnLn);
+        }
+    }
+}
+
+VOID DrawTriangle(INT32 x0, INT32 y0, INT32 x1, INT32 y1, INT32 x2, INT32 y2, UINT32 colour)
+{
+    if (!Initialised) {
+        return;    
+    }
+    // sort the vertices, y0 < y1 < y2
+    // same order as for a filled triangle
+    if (y0 > y1) {
+        SWAP(INT32, x0, x1);
+        SWAP(INT32, y0, y1);
+    }
+    if (y0 > y2) {
+        SWAP(INT32, x0, x2);
+        SWAP(INT32, y0, y2);
+    }
+    if (y1 > y2) {
+        SWAP(INT32, x1, x2);
+        SWAP(INT32, y1, y2);
+    }
+    DrawLine(x0, y0, x1, y1, colour);
+    DrawLine(x1, y1, x2, y2, colour);
+    DrawLine(x2, y2, x0, y0, colour);
+}
+
+// Fill a triangle - Bresenham method
+// TODO: full clipping before rendering
+VOID DrawFillTriangle(INT32 x0, INT32 y0, INT32 x1, INT32 y1, INT32 x2, INT32 y2, UINT32 colour)
+{
+    if (!Initialised) {
+        return;    
+    }
+    // sort the vertices, y0 < y1 < y2
+    if (y0 > y1) {
+        SWAP(INT32, x0, x1);
+        SWAP(INT32, y0, y1);
+    }
+    if (y0 > y2) {
+        SWAP(INT32, x0, x2);
+        SWAP(INT32, y0, y2);
+    }
+    if (y1 > y2) {
+        SWAP(INT32, x1, x2);
+        SWAP(INT32, y1, y2);
+    }
+    // clip y
+    if (y2 < gCurrRenBuf->ClipY0 || y0 > gCurrRenBuf->ClipY1) {
+        return;
+    }
+
+    // A [x0,y0] -> [x2,y2]
+    INT32 Ax = x0;
+    INT32 Ay = y0;
+    INT32 Adx = ABS(x2 - x0);
+    INT32 Asx = x0 < x2 ? 1 : -1;
+    INT32 Ady = -ABS(y2 - y0);
+    INT32 Asy = y0 < y2 ? 1 : -1;
+    INT32 Aerror = Adx + Ady;
+
+    INT32 Bx, By, Btargetx, Btargety, Bdx, Bsx, Bdy, Bsy, Berror;
+    if (y0 != y1) {
+        // B [x0,y0] -> [x1,y1]
+        Bx = x0;
+        By = y0;
+        Btargetx = x1;
+        Btargety = y1;
+        Bdx = ABS(Btargetx - Bx);
+        Bsx = Bx < Btargetx ? 1 : -1;
+        Bdy = -ABS(Btargety - By);
+        Bsy = By < Btargety ? 1 : -1;
+        Berror = Bdx + Bdy;
+    } else {
+        // flat top
+        // B [x1,y1] -> [x2,y2]
+        Bx = x1;
+        By = y1;
+        Btargetx = x2;
+        Btargety = y2;
+        Bdx = ABS(Btargetx - Bx);
+        Bsx = Bx < Btargetx ? 1 : -1;
+        Bdy = -ABS(Btargety - By);
+        Bsy = By < Btargety ? 1 : -1;
+        Berror = Bdx + Bdy;
+    }
+
+    BOOLEAN Acomplete = FALSE;
+    BOOLEAN Bcomplete = FALSE;
+
+    while (!Acomplete && !Bcomplete) {
+
+        INT32 currentY = Ay; // current horizontial line y-ord
+
+        if (currentY > gCurrRenBuf->ClipY1) break; // clipped
+
+        // Segment A
+        INT32 Aminx = Ax;
+        INT32 Amaxx = Ax;
+        BOOLEAN Aychange = FALSE;
+        BOOLEAN Axchange = FALSE;
+        while (!Aychange) {			
+            if (Axchange) {	// if x-ord change then update x-ord min/max
+                if (Ax > Amaxx) {
+                    Amaxx = Ax;
+                } else {
+                    Aminx = Ax;
+                }
+            }
+            // [x,y] point on A line
+            if (Ax == x2 && Ay == y2) {	// check if reached end
+                Acomplete = TRUE;
+                break;
+            }
+            INT32 Ae2 = 2 * Aerror;
+            if (Ae2 >= Ady) {
+                // update x-ord				
+                if (Ax == x2) {	// check if reached end
+                    Acomplete = TRUE;
+                    break;
+                }
+                Aerror += Ady;
+                Ax += Asx;
+                Axchange = TRUE;
+            }
+            if (Ae2 <= Adx) {
+                // update y-ord
+                if (Ay == y2) {  // check if reached end
+                    Acomplete = TRUE;
+                    break;
+                }
+                Aerror += Adx;
+                Ay += Asy;
+                Aychange = TRUE;
+            }
+        }
+
+        // Segment B (2 parts)
+        INT32 Bminx = Bx;
+        INT32 Bmaxx = Bx;
+        BOOLEAN Bychange = FALSE;
+        BOOLEAN Bxchange = FALSE;
+        while (!Bychange) {
+            if (Bxchange) {		// if x-ord change then update x-ord min/max
+                if (Bx > Bmaxx) {
+                    Bmaxx = Bx;
+                }
+                else {
+                    Bminx = Bx;
+                }
+            }
+            // [x,y] point on B line
+            if (Bx == Btargetx && By == Btargety) {	// check if reached end
+                Bcomplete = TRUE;
+                break;
+            }
+            INT32 Be2 = 2 * Berror;
+            if (Be2 >= Bdy) {
+                // update x-ord
+                if (Bx == Btargetx) {	// check if reached end
+                    Bcomplete = TRUE;
+                    break;
+                }
+                Berror += Bdy;
+                Bx += Bsx;
+                Bxchange = TRUE;
+            }
+            if (Be2 <= Bdx) {
+                // update y-ord				
+                if (By == Btargety) {	// check if reached end
+                    Bcomplete = TRUE;
+                    break;
+                }
+                Berror += Bdx;
+                By += Bsy;
+                if (By == Ay) {			// matched y-ord on A line
+                    Bychange = TRUE;
+                } else {
+                    // B y-ord changed but not matching A y-ord so reset x-ord min/mix and go round again
+                    Bminx = Bx;
+                    Bmaxx = Bx;
+                }
+            }
+        }
+        // draw horizontial line A to B
+        {
+            UINT32 xl = (Aminx < Bminx) ? Aminx : Bminx;
+            UINT32 xr = (Amaxx > Bmaxx) ? Amaxx : Bmaxx;
+            UINT32 y = currentY;
+            DEVPRINT((&gDebugTxtCfg, L"[%d,%d],%d\n", xl, xr, y));
+            if (y < gCurrRenBuf->ClipY0 || y > gCurrRenBuf->ClipY1 || xr < gCurrRenBuf->ClipX0 || xl > gCurrRenBuf->ClipX1) {
+                goto skip;  // off screen
+            }
+            if (xl < gCurrRenBuf->ClipX0) {
+                xl = gCurrRenBuf->ClipX0;
+            }
+            if (xr > gCurrRenBuf->ClipX1) {
+                xr = gCurrRenBuf->ClipX1;
+            }
+            UINT32 width = xr - xl + 1;
+            // draw line
+            UINT32 *ptr = gCurrRenBuf->PixelData + xl + (y * gCurrRenBuf->PixPerScnLn);
+#ifdef EDK2_MEM_FUNC
+            SetMem32(ptr, width * sizeof(UINT32), colour);
+#else
+            while (width--) {
+                *ptr++ = colour;
+            }
+#endif
+            skip:
+        }
+           if (!Acomplete && Bcomplete && Bx == x1 && By == y1) {	// switch to next B segment
+            // B [x1,y1] -> [x2,y2]
+            Bx = x1;
+            By = y1;
+            Btargetx = x2;
+            Btargety = y2;
+            Bdx = ABS(Btargetx - Bx);
+            Bsx = Bx < Btargetx ? 1 : -1;
+            Bdy = -ABS(Btargety - By);
+            Bsy = By < Btargety ? 1 : -1;
+            Berror = Bdx + Bdy;
+            Bcomplete = FALSE;
         }
     }
 }
