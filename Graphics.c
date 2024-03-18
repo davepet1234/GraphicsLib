@@ -932,9 +932,9 @@ VOID DrawFillTriangle(INT32 x0, INT32 y0, INT32 x1, INT32 y1, INT32 x2, INT32 y2
                 *ptr++ = colour;
             }
 #endif
-            skip:
+            skip:;  // ";" as complier requires a statement after label!
         }
-           if (!Acomplete && Bcomplete && Bx == x1 && By == y1) {	// switch to next B segment
+        if (!Acomplete && Bcomplete && Bx == x1 && By == y1) {	// switch to next B segment
             // B [x1,y1] -> [x2,y2]
             Bx = x1;
             By = y1;
