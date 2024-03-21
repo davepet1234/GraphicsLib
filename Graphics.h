@@ -147,10 +147,5 @@ VOID ClearTextBox(TEXT_CONFIG *TxtCfg);
 // WIP
 //-------------------------------------------------------------------------
 
-VOID WipBltClearScreen(UINT32 colour);
-VOID WipSetMem64ClearScreen(UINT32 colour);
-VOID WipClearScreenBlack(VOID);
-EFI_STATUS SetGraphicsMode(UINTN Mode);
-
 
 #endif // GRAPHICS_H
