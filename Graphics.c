@@ -32,9 +32,6 @@
 // When defined uses a different function to draw (full) circles that are not clipped
 #define CIRCLE_OPTIMISATION 1
 
-// When defined uses SetMem32() function to write to FB when possible
-#define EDK2_MEM_FUNC
-
 #if DEVELOPMENT_MODE
 #define DEV_WINDOW_WIDTH 200
 TEXT_CONFIG gDebugTxtCfg = {0};
@@ -55,7 +52,7 @@ STATIC VOID draw_part_circle(INT32 xc, INT32 yc, INT32 r, UINT32 colour);
 STATIC BOOLEAN draw_full_circle(INT32 xc, INT32 yc, INT32 r, UINT32 colour);
 #endif
 #if FONT_SUPPORT
-STATIC EFI_STATUS put_string(RENDER_BUFFER *RenBuf, TEXT_CONFIG *TxtCfg, UINT16 *string);
+STATIC EFI_STATUS put_string(TEXT_CONFIG *TxtCfg, UINT16 *string);
 #endif
 
 STATIC BOOLEAN Initialised = FALSE;
@@ -505,32 +502,14 @@ VOID ClearScreen(UINT32 colour)
     } else {
         UINT32 *ptr = gCurrRenBuf->PixelData;
         if (gCurrRenBuf->HorRes == gCurrRenBuf->PixPerScnLn) {
-#ifdef EDK2_MEM_FUNC
             SetMem32(ptr, gCurrRenBuf->PixPerScnLn * gCurrRenBuf->HorRes * sizeof(UINT32), colour);
-#else
-        UINT32 count = gCurrRenBuf->PixPerScnLn * gCurrRenBuf->HorRes;
-        while (count--) {
-            *ptr++ = colour;
-        }
-#endif // EDK2_MEM_FUNC
         } else {
-#ifdef EDK2_MEM_FUNC
             UINT32 height = gCurrRenBuf->VerRes;
             UINT32 wbytes = gCurrRenBuf->HorRes * sizeof(UINT32);
             while (height--) {
                 SetMem32(ptr, wbytes, colour);
                 ptr += gCurrRenBuf->PixPerScnLn;
             }
-#else
-            UINT32 h, w;
-            UINT32 offset = gCurrRenBuf->PixPerScnLn - gCurrRenBuf->HorRes;
-            for (h=0; h<gCurrRenBuf->VerRes; h++) {
-                for (w=0; w<gCurrRenBuf->HorRes; w++) {
-                    *ptr++ = colour;
-                }
-                ptr += offset;
-            }
-#endif // EDK2_MEM_FUNC
         }
     }
     // reset text position
@@ -544,24 +523,12 @@ VOID ClearClipWindow(UINT32 colour)
         return;
     }
     UINT32 *ptr = gCurrRenBuf->PixelData + gCurrRenBuf->ClipX0 + (gCurrRenBuf->ClipY0 * gCurrRenBuf->PixPerScnLn);
-#ifdef EDK2_MEM_FUNC
     UINT32 height = gCurrRenBuf->ClipY1 - gCurrRenBuf->ClipY0 +1;
     UINT32 wbytes = (gCurrRenBuf->ClipX1 - gCurrRenBuf->ClipX0 + 1) * sizeof(UINT32);
     while (height--) {
         SetMem32(ptr, wbytes, colour);
         ptr += gCurrRenBuf->PixPerScnLn;
     }
-#else
-    UINT32 height = gCurrRenBuf->ClipY1 - gCurrRenBuf->ClipY0 + 1;
-    UINT32 width = gCurrRenBuf->ClipX1 - gCurrRenBuf->ClipX0 + 1;
-    UINT32 offset = gCurrRenBuf->PixPerScnLn - width;
-    for (UINT32 h=0; h<height; h++) {
-        for (UINT32 w=0; w<width; w++) {
-            *ptr++ = colour;
-        }
-        ptr += offset;
-    }
-#endif
 }
 
 VOID PutPixel(INT32 x, INT32 y, UINT32 colour)
@@ -611,13 +578,7 @@ VOID DrawHLine(INT32 x, INT32 y, INT32 width, UINT32 colour)
     }
     // draw line
     UINT32 *ptr = gCurrRenBuf->PixelData + x + (y * gCurrRenBuf->PixPerScnLn);
-#ifdef EDK2_MEM_FUNC
     SetMem32(ptr, width * sizeof(UINT32), colour);
-#else
-    while (width--) {
-        *ptr++ = colour;
-    }
-#endif    
 }
 
 VOID DrawHLine2(INT32 x0, INT32 x1, INT32 y, UINT32 colour)
@@ -936,13 +897,7 @@ VOID DrawFillTriangle(INT32 x0, INT32 y0, INT32 x1, INT32 y1, INT32 x2, INT32 y2
             UINT32 width = xr - xl + 1;
             // draw line
             UINT32 *ptr = gCurrRenBuf->PixelData + xl + (y * gCurrRenBuf->PixPerScnLn);
-#ifdef EDK2_MEM_FUNC
             SetMem32(ptr, width * sizeof(UINT32), colour);
-#else
-            while (width--) {
-                *ptr++ = colour;
-            }
-#endif
             skip:;  // ";" as complier requires a statement after label!
         }
         if (!Acomplete && Bcomplete && Bx == x1 && By == y1) {	// switch to next B segment
@@ -1011,18 +966,8 @@ VOID DrawRectangle(INT32 x0, INT32 y0, INT32 x1, INT32 y1, UINT32 colour)
     UINT32 *ptr = gCurrRenBuf->PixelData + xl + (yt * gCurrRenBuf->PixPerScnLn);
     // top line
     if (top) {
-#ifdef EDK2_MEM_FUNC
         SetMem32(ptr, width * sizeof(UINT32), colour);
         ptr += (width - 1);
-#else
-        INT32 w = width;
-        while (TRUE) {
-            *ptr = colour;
-            w--;
-            if (!w) break;
-            ptr++;
-        }
-#endif        
     } else {
         ptr += (width - 1);
     }
@@ -1040,18 +985,8 @@ VOID DrawRectangle(INT32 x0, INT32 y0, INT32 x1, INT32 y1, UINT32 colour)
     }
     // bottom line 
     if (bottom) {
-#ifdef EDK2_MEM_FUNC
         ptr -= (width - 1);
         SetMem32(ptr, width * sizeof(UINT32), colour);
-#else
-        INT32 w = width;
-        while (TRUE) {
-            *ptr = colour;
-            w--;
-            if (!w) break;
-            ptr--;
-        }
-#endif
     } else {
         ptr -= (width - 1);
     }
@@ -1114,16 +1049,8 @@ VOID DrawFillRectangle(INT32 x0, INT32 y0, INT32 x1, INT32 y1, UINT32 colour)
     } else {        
         UINT32 *ptr = gCurrRenBuf->PixelData + xl + (yt * gCurrRenBuf->PixPerScnLn);
         while (height--) {
-#ifdef EDK2_MEM_FUNC
-        SetMem32(ptr, width * sizeof(UINT32), colour);
-        ptr += gCurrRenBuf->PixPerScnLn;
-#else
-            UINT32 w = width;
-            while (w--) {
-                *ptr++ = colour;
-            }
-            ptr += (gCurrRenBuf->PixPerScnLn - width);
-#endif // EDK2_MEM_FUNC
+            SetMem32(ptr, width * sizeof(UINT32), colour);
+            ptr += gCurrRenBuf->PixPerScnLn;
         }
     }
 }
@@ -1296,7 +1223,7 @@ UINTN EFIAPI GPrint(TEXT_CONFIG *TxtCfg, CHAR16 *sFormat, ...)
     VA_START(vl, sFormat);
     UINTN Length = UnicodeVSPrint(String, STRING_SIZE, sFormat, vl);
     VA_END(vl);
-    put_string(&gFrameBuffer, TxtCfg ? TxtCfg : &gFBTxtCfg, String);
+    put_string(TxtCfg ? TxtCfg : &gFBTxtCfg, String);
     return Length;
 }
 
@@ -1320,11 +1247,10 @@ EFI_STATUS GPutString(INT32 x, INT32 y, UINT16 *string, UINT32 FgColour, UINT32 
         .ScrollEnabled = FALSE
     };
     DbgPrint(DL_INFO, "x=%d, y=%d, X0=%d, Y0=%d, X1=%d, Y1=%d\n", x, y, TxtCfg.X0, TxtCfg.Y0, TxtCfg.X1, TxtCfg.Y1);
-    // Currently output to frame buffer so we can use blt to scroll 
-    return put_string(&gFrameBuffer, &TxtCfg, string);
+    return put_string(&TxtCfg, string);
 }
 
-STATIC EFI_STATUS put_string(RENDER_BUFFER *RenBuf, TEXT_CONFIG *TxtCfg, UINT16 *string)
+STATIC EFI_STATUS put_string(TEXT_CONFIG *TxtCfg, UINT16 *string)
 {
     if (!Initialised) {
         return EFI_NOT_READY;
@@ -1358,7 +1284,7 @@ STATIC EFI_STATUS put_string(RENDER_BUFFER *RenBuf, TEXT_CONFIG *TxtCfg, UINT16 
         x += (i * FontWidth);
     }
 
-    UINT32 *char_rbptr = RenBuf->PixelData + x + (y * RenBuf->PixPerScnLn);
+    UINT32 *char_rbptr = gCurrRenBuf->PixelData + x + (y * gCurrRenBuf->PixPerScnLn);
 
     while (TRUE) {
         // get character to display
@@ -1380,7 +1306,7 @@ STATIC EFI_STATUS put_string(RENDER_BUFFER *RenBuf, TEXT_CONFIG *TxtCfg, UINT16 
         if (code == L'\r' || DoLineWrap) {
             // move to the beginning of the line without advancing to the next line
             x = TxtCfg->X0;
-            char_rbptr = RenBuf->PixelData + x + (y * RenBuf->PixPerScnLn);
+            char_rbptr = gCurrRenBuf->PixelData + x + (y * gCurrRenBuf->PixPerScnLn);
         }
 
         // line feed
@@ -1391,30 +1317,50 @@ STATIC EFI_STATUS put_string(RENDER_BUFFER *RenBuf, TEXT_CONFIG *TxtCfg, UINT16 
                 INT32 diff = y + 2*FontHeight-1 - TxtCfg->Y1;
                 y = TxtCfg->Y0 + VerRes - FontHeight;
                 // scroll
-                EFI_STATUS Status = gGop->Blt(gGop,
-                                                (EFI_GRAPHICS_OUTPUT_BLT_PIXEL *)NULL, 
-                                                EfiBltVideoToVideo, 
-                                                TxtCfg->X0, TxtCfg->Y0 + diff, 
-                                                TxtCfg->X0, TxtCfg->Y0, 
-                                                HorRes, VerRes - diff, 0);                
-                if (EFI_ERROR(Status)) {
-                    DbgPrint(DL_ERROR, "%a(): Blt() returned %a\n", __func__, EFIStatusToStr(Status));
+                if (gRenderToScreen) {
+                    EFI_STATUS Status = gGop->Blt(gGop,
+                                                    (EFI_GRAPHICS_OUTPUT_BLT_PIXEL *)NULL, 
+                                                    EfiBltVideoToVideo, 
+                                                    TxtCfg->X0, TxtCfg->Y0 + diff, 
+                                                    TxtCfg->X0, TxtCfg->Y0, 
+                                                    HorRes, VerRes - diff, 0);                
+                    if (EFI_ERROR(Status)) {
+                        DbgPrint(DL_ERROR, "%a(): Blt() returned %a\n", __func__, EFIStatusToStr(Status));
+                    }
+                } else {
+                    UINT32 *dstptr = gCurrRenBuf->PixelData + TxtCfg->X0 + (TxtCfg->Y0 * gCurrRenBuf->PixPerScnLn);
+                    UINT32 *srcptr = dstptr + (diff * gCurrRenBuf->PixPerScnLn);
+                    UINTN height = VerRes - diff;
+                    while (height--) {
+                        CopyMem(dstptr, srcptr, HorRes * sizeof(UINT32));
+                        dstptr += gCurrRenBuf->PixPerScnLn;
+                        srcptr += gCurrRenBuf->PixPerScnLn;
+                    }
                 }
                 // blank scrolled area
                 UINT32 colour = TxtCfg->BgColour;
-                Status = gGop->Blt(gGop, 
-                                        (EFI_GRAPHICS_OUTPUT_BLT_PIXEL *)&colour, 
-                                        EfiBltVideoFill, 
-                                        0, 0, 
-                                        TxtCfg->X0, TxtCfg->Y0 + VerRes - FontHeight, 
-                                        HorRes, FontHeight, 0);                
-                if (EFI_ERROR(Status)) {
-                    DbgPrint(DL_ERROR, "%a(): Blt() returned %a\n", __func__, EFIStatusToStr(Status));
+                if (gRenderToScreen) {
+                    EFI_STATUS Status = gGop->Blt(gGop, 
+                                            (EFI_GRAPHICS_OUTPUT_BLT_PIXEL *)&colour, 
+                                            EfiBltVideoFill, 
+                                            0, 0, 
+                                            TxtCfg->X0, TxtCfg->Y0 + VerRes - FontHeight, 
+                                            HorRes, FontHeight, 0);
+                    if (EFI_ERROR(Status)) {
+                        DbgPrint(DL_ERROR, "%a(): Blt() returned %a\n", __func__, EFIStatusToStr(Status));
+                    }
+                } else {
+                    UINT32 *ptr = gCurrRenBuf->PixelData + TxtCfg->X0 + ((TxtCfg->Y0 + VerRes - FontHeight) * gCurrRenBuf->PixPerScnLn);
+                    UINTN height = FontHeight;
+                    while (height--) {
+                        SetMem32(ptr, HorRes * sizeof(UINT32), colour);
+                        ptr += gCurrRenBuf->PixPerScnLn;
+                    }
                 }
-                char_rbptr += ((FontHeight - diff) * RenBuf->PixPerScnLn);
+                char_rbptr += ((FontHeight - diff) * gCurrRenBuf->PixPerScnLn);
             } else {
                 y += FontHeight;
-                char_rbptr += (FontHeight * RenBuf->PixPerScnLn);
+                char_rbptr += (FontHeight * gCurrRenBuf->PixPerScnLn);
             }
         }
 
@@ -1440,7 +1386,7 @@ STATIC EFI_STATUS put_string(RENDER_BUFFER *RenBuf, TEXT_CONFIG *TxtCfg, UINT16 
                         }  
                         Data <<= 1;
                     }
-                    lh_rbptr += RenBuf->PixPerScnLn;
+                    lh_rbptr += gCurrRenBuf->PixPerScnLn;
                 }
                 char_rbptr += FontWidth;
                 x += FontWidth;
@@ -1526,14 +1472,23 @@ VOID ClearTextBox(TEXT_CONFIG *TxtCfg)
     UINT32 HorRes = TxtCfg->X1 - TxtCfg->X0 + 1;
     UINT32 VerRes = TxtCfg->Y1 - TxtCfg->Y0 + 1;
     UINT32 colour = TxtCfg->BgColour;
-    EFI_STATUS Status = gGop->Blt(gGop, 
-                            (EFI_GRAPHICS_OUTPUT_BLT_PIXEL *)&colour, 
-                            EfiBltVideoFill, 
-                            0, 0, 
-                            TxtCfg->X0, TxtCfg->Y0, 
-                            HorRes, VerRes, 0);                
-    if (EFI_ERROR(Status)) {
-        DbgPrint(DL_ERROR, "%a(): Blt() returned %a\n", __func__, EFIStatusToStr(Status));
+    if (gRenderToScreen) {
+        EFI_STATUS Status = gGop->Blt(gGop, 
+                                (EFI_GRAPHICS_OUTPUT_BLT_PIXEL *)&colour, 
+                                EfiBltVideoFill, 
+                                0, 0, 
+                                TxtCfg->X0, TxtCfg->Y0, 
+                                HorRes, VerRes, 0);                
+        if (EFI_ERROR(Status)) {
+            DbgPrint(DL_ERROR, "%a(): Blt() returned %a\n", __func__, EFIStatusToStr(Status));
+        }
+    } else {
+        UINT32 *ptr = gCurrRenBuf->PixelData + TxtCfg->X0 + (TxtCfg->Y0 * gCurrRenBuf->PixPerScnLn);
+        UINTN height = VerRes;
+        while (height--) {
+            SetMem32(ptr, HorRes * sizeof(UINT32), colour);
+            ptr += gCurrRenBuf->PixPerScnLn;
+        }
     }
 }
 
