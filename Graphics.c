@@ -291,6 +291,7 @@ EFI_STATUS DestroyRenderBuffer(RENDER_BUFFER *RenBuf)
         gCurrRenBuf = &gFrameBuffer;
         gRenderToScreen = TRUE;
     }
+    ZeroMem(RenBuf, sizeof(RENDER_BUFFER));
 error_exit:
     if (EFI_ERROR(Status)) {
         DbgPrint(DL_ERROR, "%a() returned %a\n", __func__, EFIStatusToStr(Status));
@@ -1192,6 +1193,9 @@ STATIC BOOLEAN draw_full_circle(INT32 xc, INT32 yc, INT32 r, UINT32 colour)
 
 VOID DrawFillCircle(INT32 xc, INT32 yc, INT32 r, UINT32 colour)
 {
+    if (!Initialised) {
+        return;
+    }
     INT32 x = 0;
     INT32 y = r;
     INT32 d = 3 - 2 * r;
@@ -1218,6 +1222,15 @@ VOID DrawFillCircle(INT32 xc, INT32 yc, INT32 r, UINT32 colour)
 
 UINTN EFIAPI GPrint(TEXT_CONFIG *TxtCfg, CHAR16 *sFormat, ...)
 {
+    if (!Initialised) {
+        return 0;
+    }
+    if (!TxtCfg->RenBuf) {
+        return 0; // no associated render buffer
+    }
+    if (TxtCfg->RenBuf != gCurrRenBuf) {
+        return 0; // current render buffer is not associated with this text box
+    }
     CHAR16 String[STRING_SIZE];
     VA_LIST vl;
     VA_START(vl, sFormat);
@@ -1233,10 +1246,11 @@ EFI_STATUS GPutString(INT32 x, INT32 y, UINT16 *string, UINT32 FgColour, UINT32 
         return EFI_NOT_READY;
     }
     TEXT_CONFIG TxtCfg = {
-        .X0 = gFrameBuffer.ClipX0,
-        .Y0 = gFrameBuffer.ClipY0,
-        .X1 = gFrameBuffer.ClipX1,
-        .Y1 = gFrameBuffer.ClipY1,
+        .RenBuf = gCurrRenBuf,
+        .X0 = gCurrRenBuf->ClipX0,
+        .Y0 = gCurrRenBuf->ClipY0,
+        .X1 = gCurrRenBuf->ClipX1,
+        .Y1 = gCurrRenBuf->ClipY1,
         .Font = Font,
         .CurrX = x,
         .CurrY = y,  
@@ -1252,8 +1266,11 @@ EFI_STATUS GPutString(INT32 x, INT32 y, UINT16 *string, UINT32 FgColour, UINT32 
 
 STATIC EFI_STATUS put_string(TEXT_CONFIG *TxtCfg, UINT16 *string)
 {
-    if (!Initialised) {
-        return EFI_NOT_READY;
+    if (!TxtCfg->RenBuf) {
+        return 0; // no associated render buffer
+    }
+    if (TxtCfg->RenBuf != gCurrRenBuf) {
+        return 0; // current render buffer is not associated with this text box
     }
     INT32 x = TxtCfg->CurrX;
     INT32 y = TxtCfg->CurrY;
@@ -1441,16 +1458,20 @@ VOID SetTextBoxFont(TEXT_CONFIG *TxtCfg, FONT font)
     TxtCfg->Font = font;
 }
 
-VOID CreateTextBox(TEXT_CONFIG *TxtCfg, INT32 x, INT32 y, INT32 Width, INT32 Height, UINT32 FgColour, UINT32 BgColour, FONT Font)
+EFI_STATUS CreateTextBox(TEXT_CONFIG *TxtCfg, INT32 x, INT32 y, INT32 Width, INT32 Height, UINT32 FgColour, UINT32 BgColour, FONT Font)
 {
-    RENDER_BUFFER *RenBuf = &gFrameBuffer;
-
+    if (!Initialised) {
+        return EFI_NOT_READY;
+    }
+    if (y + Height - 1 < 0 || y > gCurrRenBuf->VerRes - 1 || x + Width - 1 < 0 || x > gCurrRenBuf->HorRes - 1) {
+        ZeroMem(TxtCfg, sizeof(TEXT_CONFIG));
+        return EFI_INVALID_PARAMETER;
+    }
+    TxtCfg->RenBuf = gCurrRenBuf;   
     if (x < 0) x = 0;
-    if (x > RenBuf->HorRes - 1) x = RenBuf->HorRes - 1;
-    if (x + Width > RenBuf->HorRes) Width = RenBuf->HorRes - x;
+    if (x + Width > gCurrRenBuf->HorRes) Width = gCurrRenBuf->HorRes - x;
     if (y < 0) y = 0;
-    if (y > RenBuf->VerRes - 1) y = RenBuf->VerRes - 1;
-    if (y + Height > RenBuf->VerRes) Height = RenBuf->VerRes - y;
+    if (y + Height > gCurrRenBuf->VerRes) Height = gCurrRenBuf->VerRes - y;
 
     TxtCfg->X0 = x;
     TxtCfg->Y0 = y;
@@ -1465,10 +1486,21 @@ VOID CreateTextBox(TEXT_CONFIG *TxtCfg, INT32 x, INT32 y, INT32 Width, INT32 Hei
     TxtCfg->BgColourEnabled = TRUE;
     TxtCfg->LineWrapEnabled = TRUE;
     TxtCfg->ScrollEnabled = TRUE;
+
+    return EFI_SUCCESS;
 }
 
 VOID ClearTextBox(TEXT_CONFIG *TxtCfg)
 {
+    if (!Initialised) {
+        return;
+    }
+    if (!TxtCfg->RenBuf) {
+        return; // no associated render buffer
+    }
+    if (TxtCfg->RenBuf != gCurrRenBuf) {
+        return; // current render buffer is not associated with this text box
+    }
     UINT32 HorRes = TxtCfg->X1 - TxtCfg->X0 + 1;
     UINT32 VerRes = TxtCfg->Y1 - TxtCfg->Y0 + 1;
     UINT32 colour = TxtCfg->BgColour;

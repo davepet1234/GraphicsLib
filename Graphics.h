@@ -33,18 +33,19 @@ typedef struct {
 
 #if FONT_SUPPORT
 typedef struct {
-    INT32       X0;
-    INT32       Y0;
-    INT32       X1;
-    INT32       Y1;
-    FONT        Font;
-    INT32       CurrX;
-    INT32       CurrY;  
-    UINT32      FgColour;
-    UINT32      BgColour;
-    BOOLEAN     BgColourEnabled;  // determines if text background is written
-    BOOLEAN     LineWrapEnabled;
-    BOOLEAN     ScrollEnabled;    
+    RENDER_BUFFER   *RenBuf;
+    INT32           X0;
+    INT32           Y0;
+    INT32           X1;
+    INT32           Y1;
+    FONT            Font;
+    INT32           CurrX;
+    INT32           CurrY;  
+    UINT32          FgColour;
+    UINT32          BgColour;
+    BOOLEAN         BgColourEnabled;  // determines if text background is written
+    BOOLEAN         LineWrapEnabled;
+    BOOLEAN         ScrollEnabled;    
 } TEXT_CONFIG;
 #endif
 
@@ -105,7 +106,7 @@ VOID SetTextBoxForeground(TEXT_CONFIG *TxtCfg, UINT32 colour);
 VOID SetTextBoxBackground(TEXT_CONFIG *TxtCfg, UINT32 colour);
 VOID SetTextBoxFont(TEXT_CONFIG *TxtCfg, FONT font);
 
-VOID CreateTextBox(TEXT_CONFIG *TxtCfg, INT32 x, INT32 y, INT32 Width, INT32 Height, UINT32 FgColour, UINT32 BgColour, FONT Font);
+EFI_STATUS CreateTextBox(TEXT_CONFIG *TxtCfg, INT32 x, INT32 y, INT32 Width, INT32 Height, UINT32 FgColour, UINT32 BgColour, FONT Font);
 VOID ClearTextBox(TEXT_CONFIG *TxtCfg);
 
 #endif // FONT_SUPPORT
