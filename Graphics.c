@@ -19,6 +19,13 @@
 #include <Library/MemoryAllocationLib.h>
 #include "Graphics.h"
 
+#if EDK2SIM_SUPPORT
+#include <Edk2Sim.h>
+#else
+#define EDK2SIM_GFX_BEGIN
+#define EDK2SIM_GFX_END
+#endif
+
 #if FONT_SUPPORT
 #include "Font.h"
 #endif
@@ -59,10 +66,10 @@ STATIC BOOLEAN Initialised = FALSE;
 #define RENBUF_SIG 0x52425546UL   // "RBUF"
 
 // globals
-STATIC UINTN                            gOrigGfxMode = 0;
+STATIC UINT32                           gOrigGfxMode = 0;
 STATIC UINTN                            gOrigTxtMode = 0;
 STATIC EFI_GRAPHICS_OUTPUT_PROTOCOL     *gGop = NULL;
-STATIC UINTN                            gCurrMode = 0;
+STATIC UINT32                           gCurrMode = 0;
 STATIC RENDER_BUFFER                    gFrameBuffer = {0};
 STATIC RENDER_BUFFER                    *gCurrRenBuf = NULL;
 STATIC BOOLEAN                          gRenderToScreen = TRUE;
@@ -116,6 +123,7 @@ STATIC VOID init_globals(VOID)
     gRenderToScreen = TRUE;
 #if FONT_SUPPORT
     // Text Config
+    gFBTxtCfg.RenBuf = &gFrameBuffer;
     gFBTxtCfg.X0 = 0;
     gFBTxtCfg.Y0 = 0;
     gFBTxtCfg.X1 = gFrameBuffer.HorRes - 1;
@@ -142,7 +150,7 @@ EFI_STATUS RestoreConsole(VOID)
     return gST->ConOut->SetMode(gST->ConOut, gOrigTxtMode);
 }
 
-EFI_STATUS SetGraphicsMode(UINTN Mode)
+EFI_STATUS SetGraphicsMode(UINT32 Mode)
 {
     if (!Initialised) {
         return EFI_NOT_READY;
@@ -155,7 +163,7 @@ EFI_STATUS SetGraphicsMode(UINTN Mode)
     return Status;
 }
 
-EFI_STATUS GetGraphicsMode(UINTN *Mode)
+EFI_STATUS GetGraphicsMode(UINT32 *Mode)
 {
     if (!Initialised) {
         return EFI_NOT_READY;
@@ -172,16 +180,17 @@ EFI_STATUS SetDisplayResolution(UINT32 HorRes, UINT32 VerRes)
     if (!Initialised) {
         return EFI_NOT_READY;
     }
-    for (UINTN i = 0; i < gGop->Mode->MaxMode; ++i) {
-        EFI_GRAPHICS_OUTPUT_MODE_INFORMATION* ModeInfo = NULL;
-        UINTN ModeSize = gGop->Mode->SizeOfInfo;
-
-        EFI_STATUS Status = gGop->QueryMode(gGop, i, &ModeSize, &ModeInfo);
+    for (UINT32 i = 0; i < gGop->Mode->MaxMode; ++i) {
+        EFI_GRAPHICS_OUTPUT_MODE_INFORMATION* Info;
+        UINTN SizeOfInfo;
+        EFI_STATUS Status = gGop->QueryMode(gGop, i, &SizeOfInfo, &Info);
         if (EFI_ERROR(Status)){
             Print(L"ERROR: Failed mode query on %d: 0x%x\n", i, Status);
             return Status;
         }
-        if (ModeInfo->HorizontalResolution == HorRes && ModeInfo->VerticalResolution == VerRes) {
+        BOOLEAN Match = (Info->HorizontalResolution == HorRes && Info->VerticalResolution == VerRes) ? TRUE : FALSE;
+        FreePool(Info);
+        if (Match) {
             return SetGraphicsMode(i);
         }
     }
@@ -189,7 +198,7 @@ EFI_STATUS SetDisplayResolution(UINT32 HorRes, UINT32 VerRes)
     return EFI_UNSUPPORTED;
 }
 
-UINTN NumGraphicsModes(VOID)
+UINT32 NumGraphicsModes(VOID)
 {
     if (!Initialised) {
         return 0;
@@ -197,27 +206,28 @@ UINTN NumGraphicsModes(VOID)
     return gGop->Mode->MaxMode;
 }
 
-EFI_STATUS QueryGraphicsMode(UINTN Mode, UINT32 *HorRes, UINT32 *VerRes)
+EFI_STATUS QueryGraphicsMode(UINT32 Mode, UINT32 *HorRes, UINT32 *VerRes)
 {
     if (!Initialised) {
         return EFI_NOT_READY;
     }
-    EFI_GRAPHICS_OUTPUT_MODE_INFORMATION* ModeInfo = NULL;
-    UINTN ModeSize = gGop->Mode->SizeOfInfo;
-    EFI_STATUS Status = gGop->QueryMode(gGop, Mode, &ModeSize, &ModeInfo);
+    EFI_GRAPHICS_OUTPUT_MODE_INFORMATION* Info;
+    UINTN SizeOfInfo;
+    EFI_STATUS Status = gGop->QueryMode(gGop, Mode, &SizeOfInfo, &Info);
     if (EFI_ERROR(Status)){
         return Status;
     }
     if (HorRes) {
-        *HorRes = ModeInfo->HorizontalResolution;
+        *HorRes = Info->HorizontalResolution;
     }
     if (VerRes) {
-        *VerRes = ModeInfo->VerticalResolution;
+        *VerRes = Info->VerticalResolution;
     }
+    FreePool(Info);
     return EFI_SUCCESS;
 }
 
-UINT32 GetFBHorRes(VOID)
+INT32 GetFBHorRes(VOID)
 {
     if (!Initialised) {
         return 0;
@@ -225,7 +235,7 @@ UINT32 GetFBHorRes(VOID)
     return gFrameBuffer.HorRes;
 }
 
-UINT32 GetFBVerRes(VOID)
+INT32 GetFBVerRes(VOID)
 {
     if (!Initialised) {
         return 0;
@@ -446,22 +456,22 @@ VOID set_clipping(RENDER_BUFFER *RenBuf, INT32 x0, INT32 y0, INT32 x1, INT32 y1)
     // clip to screen
     if (RenBuf->ClipX0 < 0) {
         RenBuf->ClipX0 = 0;
-    } else if (RenBuf->ClipX0 >= RenBuf->HorRes) {
+    } else if (RenBuf->ClipX0 >= (INT32)RenBuf->HorRes) {
         RenBuf->ClipX0 = RenBuf->HorRes - 1;
     }
     if (RenBuf->ClipX1 < 0) {
         RenBuf->ClipX1 = 0;
-    } else if (RenBuf->ClipX1 >= RenBuf->HorRes) {
+    } else if (RenBuf->ClipX1 >= (INT32)RenBuf->HorRes) {
         RenBuf->ClipX1 = RenBuf->HorRes - 1;
     }
     if (RenBuf->ClipY0 < 0) {
         RenBuf->ClipY0 = 0;
-    } else if (RenBuf->ClipY0 >= RenBuf->VerRes) {
+    } else if (RenBuf->ClipY0 >= (INT32)RenBuf->VerRes) {
         RenBuf->ClipY0 = RenBuf->VerRes - 1;
     }
     if (RenBuf->ClipY1 < 0) {
         RenBuf->ClipY1 = 0;
-    } else if (RenBuf->ClipY1 >= RenBuf->VerRes) {
+    } else if (RenBuf->ClipY1 >= (INT32)RenBuf->VerRes) {
         RenBuf->ClipY1 = RenBuf->VerRes - 1;
     }
 }
@@ -543,7 +553,11 @@ VOID PutPixel(INT32 x, INT32 y, UINT32 colour)
     }
     // draw pixel
     UINT32 *ptr = gCurrRenBuf->PixelData + x + (y * gCurrRenBuf->PixPerScnLn);
+
+    EDK2SIM_GFX_BEGIN;
     *ptr = colour;
+    EDK2SIM_GFX_END;
+
 }
 
 UINT32 GetPixel(INT32 x, INT32 y)
@@ -556,15 +570,14 @@ UINT32 GetPixel(INT32 x, INT32 y)
         return 0;
     }
     // draw pixel
+    EDK2SIM_GFX_BEGIN;
     UINT32 *ptr = gCurrRenBuf->PixelData + x + (y * gCurrRenBuf->PixPerScnLn);
+    EDK2SIM_GFX_END;
     return *ptr;
 }
 
-VOID DrawHLine(INT32 x, INT32 y, INT32 width, UINT32 colour)
+STATIC VOID draw_hline(INT32 x, INT32 y, INT32 width, UINT32 colour)
 {
-    if (!Initialised){
-        return;
-    }
     // clip line
     INT32 x1 = x + width - 1;
     if (y < gCurrRenBuf->ClipY0 || y > gCurrRenBuf->ClipY1 || x1 < gCurrRenBuf->ClipX0 || x > gCurrRenBuf->ClipX1) {
@@ -578,8 +591,19 @@ VOID DrawHLine(INT32 x, INT32 y, INT32 width, UINT32 colour)
         width -= (x1 - gCurrRenBuf->ClipX1);
     }
     // draw line
-    UINT32 *ptr = gCurrRenBuf->PixelData + x + (y * gCurrRenBuf->PixPerScnLn);
+    UINT32* ptr = gCurrRenBuf->PixelData + x + (y * gCurrRenBuf->PixPerScnLn);
     SetMem32(ptr, width * sizeof(UINT32), colour);
+}
+
+
+VOID DrawHLine(INT32 x, INT32 y, INT32 width, UINT32 colour)
+{
+    if (!Initialised){
+        return;
+    }
+    EDK2SIM_GFX_BEGIN;
+    draw_hline(x, y, width, colour);
+    EDK2SIM_GFX_END;
 }
 
 VOID DrawHLine2(INT32 x0, INT32 x1, INT32 y, UINT32 colour)
@@ -609,10 +633,12 @@ VOID DrawVLine(INT32 x, INT32 y, INT32 height, UINT32 colour)
     }
     // draw line
     UINT32 *ptr = gCurrRenBuf->PixelData + x + (y * gCurrRenBuf->PixPerScnLn);
+    EDK2SIM_GFX_BEGIN;
     while (height--) {
         *ptr = colour;
         ptr += gCurrRenBuf->PixPerScnLn;
     }
+    EDK2SIM_GFX_END;
 }
 
 VOID DrawLine(INT32 x0, INT32 y0, INT32 x1, INT32 y1, UINT32 colour)
@@ -675,6 +701,7 @@ STATIC VOID draw_line(INT32 x0, INT32 y0, INT32 x1, INT32 y1, UINT32 colour)
 
     UINT32 *ptr = gCurrRenBuf->PixelData + x0 + (y0 * gCurrRenBuf->PixPerScnLn);
 
+    EDK2SIM_GFX_BEGIN;
     while (TRUE) {
 
         *ptr = colour;
@@ -697,6 +724,7 @@ STATIC VOID draw_line(INT32 x0, INT32 y0, INT32 x1, INT32 y1, UINT32 colour)
             ptr += (sy * (INT32)gCurrRenBuf->PixPerScnLn);
         }
     }
+    EDK2SIM_GFX_END;
 }
 
 VOID DrawTriangle(INT32 x0, INT32 y0, INT32 x1, INT32 y1, INT32 x2, INT32 y2, UINT32 colour)
@@ -786,6 +814,7 @@ VOID DrawFillTriangle(INT32 x0, INT32 y0, INT32 x1, INT32 y1, INT32 x2, INT32 y2
     BOOLEAN Acomplete = FALSE;
     BOOLEAN Bcomplete = FALSE;
 
+    EDK2SIM_GFX_BEGIN;
     while (!Acomplete && !Bcomplete) {
 
         INT32 currentY = Ay; // current horizontial line y-ord
@@ -882,9 +911,9 @@ VOID DrawFillTriangle(INT32 x0, INT32 y0, INT32 x1, INT32 y1, INT32 x2, INT32 y2
         }
         // draw horizontial line A to B
         {
-            UINT32 xl = (Aminx < Bminx) ? Aminx : Bminx;
-            UINT32 xr = (Amaxx > Bmaxx) ? Amaxx : Bmaxx;
-            UINT32 y = currentY;
+            INT32 xl = (Aminx < Bminx) ? Aminx : Bminx;
+            INT32 xr = (Amaxx > Bmaxx) ? Amaxx : Bmaxx;
+            INT32 y = currentY;
             DEVPRINT((&gDebugTxtCfg, L"[%d,%d],%d\n", xl, xr, y));
             if (y < gCurrRenBuf->ClipY0 || y > gCurrRenBuf->ClipY1 || xr < gCurrRenBuf->ClipX0 || xl > gCurrRenBuf->ClipX1) {
                 goto skip;  // off screen
@@ -895,7 +924,7 @@ VOID DrawFillTriangle(INT32 x0, INT32 y0, INT32 x1, INT32 y1, INT32 x2, INT32 y2
             if (xr > gCurrRenBuf->ClipX1) {
                 xr = gCurrRenBuf->ClipX1;
             }
-            UINT32 width = xr - xl + 1;
+            INT32 width = xr - xl + 1;
             // draw line
             UINT32 *ptr = gCurrRenBuf->PixelData + xl + (y * gCurrRenBuf->PixPerScnLn);
             SetMem32(ptr, width * sizeof(UINT32), colour);
@@ -915,6 +944,7 @@ VOID DrawFillTriangle(INT32 x0, INT32 y0, INT32 x1, INT32 y1, INT32 x2, INT32 y2
             Bcomplete = FALSE;
         }
     }
+    EDK2SIM_GFX_END;
 }
 
 VOID DrawRectangle(INT32 x0, INT32 y0, INT32 x1, INT32 y1, UINT32 colour)
@@ -964,6 +994,7 @@ VOID DrawRectangle(INT32 x0, INT32 y0, INT32 x1, INT32 y1, UINT32 colour)
         height -= (yb - gCurrRenBuf->ClipY1);
     }
     // draw rectangle
+    EDK2SIM_GFX_BEGIN;
     UINT32 *ptr = gCurrRenBuf->PixelData + xl + (yt * gCurrRenBuf->PixPerScnLn);
     // top line
     if (top) {
@@ -1001,6 +1032,7 @@ VOID DrawRectangle(INT32 x0, INT32 y0, INT32 x1, INT32 y1, UINT32 colour)
             ptr -= gCurrRenBuf->PixPerScnLn;
         }
     }
+    EDK2SIM_GFX_END;
 }
 
 VOID DrawFillRectangle(INT32 x0, INT32 y0, INT32 x1, INT32 y1, UINT32 colour)
@@ -1150,7 +1182,8 @@ STATIC BOOLEAN draw_full_circle(INT32 xc, INT32 yc, INT32 r, UINT32 colour)
     // (xc - y, yc - x)
     UINT32 *ptr_lu = ptr_ld;
     *ptr_ru = colour;
-    
+
+    EDK2SIM_GFX_BEGIN;
     while (y >= x) {
         x++;
         ptr_br++;
@@ -1187,6 +1220,8 @@ STATIC BOOLEAN draw_full_circle(INT32 xc, INT32 yc, INT32 r, UINT32 colour)
         *ptr_ru = colour;   // (xc + y, yc - x)
         *ptr_lu = colour;   // (xc - y, yc - x)
     }
+    EDK2SIM_GFX_END;
+
     return TRUE;
 }
 #endif
@@ -1200,11 +1235,12 @@ VOID DrawFillCircle(INT32 xc, INT32 yc, INT32 r, UINT32 colour)
     INT32 y = r;
     INT32 d = 3 - 2 * r;
 
+    EDK2SIM_GFX_BEGIN;
     while (y >= x) {
-        DrawHLine(xc - x, yc + y, x * 2 + 1, colour); // bottom
-        DrawHLine(xc - x, yc - y, x * 2 + 1, colour); // top
-        DrawHLine(xc - y, yc + x, y * 2 + 1, colour); // mid-bottom
-        DrawHLine(xc - y, yc - x, y * 2 + 1, colour); // mid-top
+        draw_hline(xc - x, yc + y, x * 2 + 1, colour); // bottom
+        draw_hline(xc - x, yc - y, x * 2 + 1, colour); // top
+        draw_hline(xc - y, yc + x, y * 2 + 1, colour); // mid-bottom
+        draw_hline(xc - y, yc - x, y * 2 + 1, colour); // mid-top
         x++;
 
         if (d > 0) {
@@ -1214,6 +1250,7 @@ VOID DrawFillCircle(INT32 xc, INT32 yc, INT32 r, UINT32 colour)
             d = d + 4 * x + 6;
         }
     }
+    EDK2SIM_GFX_END;
 }
 
 #if FONT_SUPPORT
@@ -1224,12 +1261,6 @@ UINTN EFIAPI GPrint(TEXT_CONFIG *TxtCfg, CHAR16 *sFormat, ...)
 {
     if (!Initialised) {
         return 0;
-    }
-    if (!TxtCfg->RenBuf) {
-        return 0; // no associated render buffer
-    }
-    if (TxtCfg->RenBuf != gCurrRenBuf) {
-        return 0; // current render buffer is not associated with this text box
     }
     CHAR16 String[STRING_SIZE];
     VA_LIST vl;
@@ -1266,6 +1297,9 @@ EFI_STATUS GPutString(INT32 x, INT32 y, UINT16 *string, UINT32 FgColour, UINT32 
 
 STATIC EFI_STATUS put_string(TEXT_CONFIG *TxtCfg, UINT16 *string)
 {
+    if (!TxtCfg || !string || string[0] == L'\0') {
+        return 0;
+    }
     if (!TxtCfg->RenBuf) {
         return 0; // no associated render buffer
     }
@@ -1275,11 +1309,11 @@ STATIC EFI_STATUS put_string(TEXT_CONFIG *TxtCfg, UINT16 *string)
     INT32 x = TxtCfg->CurrX;
     INT32 y = TxtCfg->CurrY;
 
-    UINT32 HorRes = TxtCfg->X1 - TxtCfg->X0 + 1;
-    UINT32 VerRes = TxtCfg->Y1 - TxtCfg->Y0 + 1;
+    INT32 HorRes = TxtCfg->X1 - TxtCfg->X0 + 1;
+    INT32 VerRes = TxtCfg->Y1 - TxtCfg->Y0 + 1;
 
-    UINTN FontWidth = GetFontWidth(TxtCfg->Font);
-    UINTN FontHeight = GetFontHeight(TxtCfg->Font);
+    INT32 FontWidth = GetFontWidth(TxtCfg->Font);
+    INT32 FontHeight = GetFontHeight(TxtCfg->Font);
 
     UINTN numChars = StrLen(string);
     if (y < TxtCfg->Y0) {
@@ -1294,7 +1328,7 @@ STATIC EFI_STATUS put_string(TEXT_CONFIG *TxtCfg, UINT16 *string)
     if ( (x > TxtCfg->X1) && !TxtCfg->LineWrapEnabled) {
         return EFI_NOT_READY; // off right and line wrap not enabled
     }
-    UINTN i = 0;
+    INT32 i = 0;
     if (x < TxtCfg->X0) {
         // determine first visible character and position
         i = (TxtCfg->X0 - x) / FontWidth;
@@ -1303,6 +1337,7 @@ STATIC EFI_STATUS put_string(TEXT_CONFIG *TxtCfg, UINT16 *string)
 
     UINT32 *char_rbptr = gCurrRenBuf->PixelData + x + (y * gCurrRenBuf->PixPerScnLn);
 
+    EDK2SIM_GFX_BEGIN;
     while (TRUE) {
         // get character to display
         UINT16 code = string[i];
@@ -1413,8 +1448,11 @@ STATIC EFI_STATUS put_string(TEXT_CONFIG *TxtCfg, UINT16 *string)
         // next character
         i++;
     }
+    EDK2SIM_GFX_END;
+
     TxtCfg->CurrX = x;
     TxtCfg->CurrY = y;
+
     return EFI_SUCCESS;
 }
 

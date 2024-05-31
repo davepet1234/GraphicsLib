@@ -21,9 +21,9 @@
 
 typedef struct {
     UINT32  Sig;
-    UINT32  HorRes;
-    UINT32  VerRes;
-    UINT32  PixPerScnLn;
+    INT32   HorRes;
+    INT32   VerRes;
+    INT32   PixPerScnLn;
     INT32   ClipX0;
     INT32   ClipY0;
     INT32   ClipX1;
@@ -52,13 +52,13 @@ typedef struct {
 // Functions to initialise frame buffer
 EFI_STATUS InitGraphics(VOID);
 EFI_STATUS RestoreConsole(VOID);
-EFI_STATUS SetGraphicsMode(UINTN Mode);
-EFI_STATUS GetGraphicsMode(UINTN *Mode);
+EFI_STATUS SetGraphicsMode(UINT32 Mode);
+EFI_STATUS GetGraphicsMode(UINT32 *Mode);
 EFI_STATUS SetDisplayResolution(UINT32 Width, UINT32 Height);
-UINTN NumGraphicsModes(VOID);
-EFI_STATUS QueryGraphicsMode(UINTN Mode, UINT32 *HorRes, UINT32 *VerRes);
-UINT32 GetFBHorRes(VOID);
-UINT32 GetFBVerRes(VOID);
+UINT32 NumGraphicsModes(VOID);
+EFI_STATUS QueryGraphicsMode(UINT32 Mode, UINT32 *HorRes, UINT32 *VerRes);
+INT32 GetFBHorRes(VOID);
+INT32 GetFBVerRes(VOID);
 
 // Functions that control render target
 EFI_STATUS CreateRenderBuffer(RENDER_BUFFER *RenBuf, UINT32 Width, UINT32 Height);
