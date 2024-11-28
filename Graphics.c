@@ -513,7 +513,7 @@ VOID ClearScreen(UINT32 colour)
     } else {
         UINT32 *ptr = gCurrRenBuf->PixelData;
         if (gCurrRenBuf->HorRes == gCurrRenBuf->PixPerScnLn) {
-            SetMem32(ptr, gCurrRenBuf->PixPerScnLn * gCurrRenBuf->HorRes * sizeof(UINT32), colour);
+            SetMem32(ptr, gCurrRenBuf->PixPerScnLn * gCurrRenBuf->VerRes * sizeof(UINT32), colour);
         } else {
             UINT32 height = gCurrRenBuf->VerRes;
             UINT32 wbytes = gCurrRenBuf->HorRes * sizeof(UINT32);
