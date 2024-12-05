@@ -11,45 +11,74 @@
 #ifndef GRAPHICS_H
 #define GRAPHICS_H
 
-#define FONT_SUPPORT  1
-
 #include <Uefi.h>
 #include <Library/UefiLib.h>
-#if FONT_SUPPORT
-#include "Font.h"
-#endif
 
-typedef struct {
-    UINT32  Sig;
-    INT32   HorRes;
-    INT32   VerRes;
-    INT32   PixPerScnLn;
-    INT32   ClipX0;
-    INT32   ClipY0;
-    INT32   ClipX1;
-    INT32   ClipY1;
-    UINT32  *PixelData;
-} RENDER_BUFFER;
+// Supported fonts
+typedef enum {
+    FONT5x7=0,  // 5x7
+    FONT5x8,    // 5x8
+    FONT6x9,    // 5x9
+    FONT6x10,   // 6x10
+    FONT6x12,   // 6x12
+    FONT6x13,   // 6x13
+    FONT6x13B,  
+    FONT6x13O,
+    FONT7x13,   // 7x13
+    FONT7x13B, 
+    FONT7x13O,
+    FONT7x14,   // 7x14
+    FONT7x14B,
+    FONT8x13,   // 8x13
+    FONT8x13B,
+    FONT8x13O,
+    FONT9x15,   // 9x15
+    FONT9x15B,
+    FONT9x18,   // 9x18
+    FONT9x18B,
+    FONT10x20,  // 10x20
+    NUM_FONTS
+} FONT;
 
-#if FONT_SUPPORT
+// Text config info
 typedef struct {
-    RENDER_BUFFER   *RenBuf;
     INT32           X0;
     INT32           Y0;
     INT32           X1;
     INT32           Y1;
     FONT            Font;
+    CONST UINT8     *FontData;
     INT32           CurrX;
     INT32           CurrY;  
     UINT32          FgColour;
     UINT32          BgColour;
     BOOLEAN         BgColourEnabled;  // determines if text background is written
     BOOLEAN         LineWrapEnabled;
-    BOOLEAN         ScrollEnabled;    
+    BOOLEAN         ScrollEnabled;
 } TEXT_CONFIG;
-#endif
 
-// Functions to initialise frame buffer
+// Render buffer info
+typedef struct {
+    UINT32      Sig;
+    INT32       HorRes;
+    INT32       VerRes;
+    INT32       PixPerScnLn;
+    INT32       ClipX0;
+    INT32       ClipY0;
+    INT32       ClipX1;
+    INT32       ClipY1;
+    UINT32      *PixelData;
+    TEXT_CONFIG TxtCfg;
+} RENDER_BUFFER;
+
+// Text box info
+typedef struct {
+    RENDER_BUFFER   *RenBuf;
+    TEXT_CONFIG     TxtCfg;
+} TEXT_BOX;
+
+
+// Functions to initialise/query frame buffer
 EFI_STATUS InitGraphics(VOID);
 EFI_STATUS RestoreConsole(VOID);
 EFI_STATUS SetGraphicsMode(UINT32 Mode);
@@ -71,13 +100,14 @@ EFI_STATUS DisplayRenderBuffer(RENDER_BUFFER *RenBuf, INT32 x, INT32 y);
 UINT32 GetHorRes(VOID);
 UINT32 GetVerRes(VOID);
 
+// Clipping functions
 VOID ResetClipping(VOID);
 VOID SetClipping(INT32 x0, INT32 y0, INT32 x1, INT32 y1);
 BOOLEAN Clipped(VOID);
 
+// Graphic primitives
 VOID ClearScreen(UINT32 colour);
 VOID ClearClipWindow(UINT32 colour);
-
 VOID PutPixel(INT32 x, INT32 y, UINT32 colour);
 UINT32 GetPixel(INT32 x, INT32 y);
 VOID DrawHLine(INT32 x, INT32 y, INT32 width, UINT32 colour);
@@ -91,29 +121,35 @@ VOID DrawFillRectangle(INT32 x0, INT32 y0, INT32 x1, INT32 y1, UINT32 colour);
 VOID DrawCircle(INT32 xc, INT32 yc, INT32 r, UINT32 colour);
 VOID DrawFillCircle(INT32 xc, INT32 yc, INT32 r, UINT32 colour);
 
-#if FONT_SUPPORT
+// Font info functions
+CONST CHAR8 *GetFontName(FONT Font);
+UINT8 GetFontWidth(FONT Font);
+UINT8 GetFontHeight(FONT Font);
 
-UINTN EFIAPI GPrint(TEXT_CONFIG *TxtCfg, CHAR16 *sFormat, ...);
-EFI_STATUS GPutString(INT32 x, INT32 y, UINT16 *string, UINT32 FgColour, UINT32 BgColour, BOOLEAN BgColourEnabled, FONT Font);
-
+// Text printing functions to current render target
+EFI_STATUS EFIAPI GPutString(INT32 x, INT32 y, UINT32 FgColour, UINT32 BgColour, BOOLEAN BgColourEnabled, FONT Font, CHAR16 *sFormat, ...);
+UINTN EFIAPI GPrint(CHAR16 *sFormat, ...);
 VOID EnableTextBackground(BOOLEAN State);
 VOID SetTextForeground(UINT32 colour);
 VOID SetTextBackground(UINT32 colour);
 VOID SetFont(FONT font);
 
-VOID EnableTextBoxBackground(TEXT_CONFIG *TxtCfg, BOOLEAN State);
-VOID SetTextBoxForeground(TEXT_CONFIG *TxtCfg, UINT32 colour);
-VOID SetTextBoxBackground(TEXT_CONFIG *TxtCfg, UINT32 colour);
-VOID SetTextBoxFont(TEXT_CONFIG *TxtCfg, FONT font);
+// Text box functions
+EFI_STATUS CreateTextBox(TEXT_BOX *TxtBox, RENDER_BUFFER *RenBuf, INT32 x, INT32 y, INT32 Width, INT32 Height, UINT32 FgColour, UINT32 BgColour, FONT Font);
+EFI_STATUS ClearTextBox(TEXT_BOX *TxtBox);
+UINTN EFIAPI GPrintTextBox(TEXT_BOX *TxtBox, CHAR16 *sFormat, ...);
+VOID EnableTextBoxBackground(TEXT_BOX *TxtBox, BOOLEAN State);
+VOID SetTextBoxForeground(TEXT_BOX *TxtBox, UINT32 colour);
+VOID SetTextBoxBackground(TEXT_BOX *TxtBox, UINT32 colour);
+VOID SetTextBoxFont(TEXT_BOX *TxtBox, FONT Font);
 
-EFI_STATUS CreateTextBox(TEXT_CONFIG *TxtCfg, INT32 x, INT32 y, INT32 Width, INT32 Height, UINT32 FgColour, UINT32 BgColour, FONT Font);
-VOID ClearTextBox(TEXT_CONFIG *TxtCfg);
+// Miscellaneous functions
+VOID PrintFontInfo(CONST UINT8 *FontData);
 
-#endif // FONT_SUPPORT
-
-
+// Custom colour
 #define RGB_COLOUR(r, g, b) (((r) << 16) | ((g) << 8) | (b))
 
+// Predefined colours
 #define RED         RGB_COLOUR(255, 0, 0)
 #define DARK_RED    RGB_COLOUR(139, 0, 0)
 #define PINK        RGB_COLOUR(255, 192, 203)
@@ -143,10 +179,5 @@ VOID ClearTextBox(TEXT_CONFIG *TxtCfg);
 #define SILVER      RGB_COLOUR(192, 192, 192)
 #define BLACK       RGB_COLOUR(0, 0, 0)
 #define PURPLE      RGB_COLOUR(128, 0, 128)
-
-//-------------------------------------------------------------------------
-// WIP
-//-------------------------------------------------------------------------
-
 
 #endif // GRAPHICS_H

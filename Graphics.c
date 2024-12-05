@@ -8,16 +8,16 @@
 */
 
 #define DEBUG_SUPPORT 0
-#define DEVELOPMENT_MODE 0
 
 #include <Uefi.h>
 #include <Library/UefiLib.h>
 #include <Library/PrintLib.h>
 #include <Library/DebugLib.h>
-#include <Library/UefiBootServicesTableLib.h> //###
+#include <Library/UefiBootServicesTableLib.h>
 #include <Library/BaseMemoryLib.h>
 #include <Library/MemoryAllocationLib.h>
 #include "Graphics.h"
+#include "fonts/fonts.h"
 
 #if EDK2SIM_SUPPORT
 #include <Edk2Sim.h>
@@ -26,9 +26,6 @@
 #define EDK2SIM_GFX_END
 #endif
 
-#if FONT_SUPPORT
-#include "Font.h"
-#endif
 
 #if DEBUG_SUPPORT
 #include "DebugPrint.h"
@@ -39,17 +36,13 @@
 // When defined uses a different function to draw (full) circles that are not clipped
 #define CIRCLE_OPTIMISATION 1
 
-#if DEVELOPMENT_MODE
-#define DEV_WINDOW_WIDTH 200
-TEXT_CONFIG gDebugTxtCfg = {0};
-// Usage: DEVPRINT((&gDebugTxtCfg, L"Message\n"));
-#define DEVPRINT(x) GPrint x
-#else
-#define DEVPRINT(x)
-#endif
+#define DEFAULT_FONT        FONT10x20
+#define DEFAULT_FG_COLOUR   WHITE
+#define DEFAULT_BG_COLOUR   BLACK
 
 // prototypes
 STATIC VOID init_globals(VOID);
+STATIC VOID init_renbuf(RENDER_BUFFER *RenBuf, INT32 HorRes, INT32 VerRes, INT32 PixPerScnLn, UINT32 *PixelData);
 STATIC VOID set_clipping(RENDER_BUFFER *RenBuf, INT32 x0, INT32 y0, INT32 x1, INT32 y1);
 STATIC VOID reset_clipping(RENDER_BUFFER *RenBuf);
 STATIC BOOLEAN clipped(RENDER_BUFFER *RenBuf);
@@ -58,9 +51,13 @@ STATIC VOID draw_part_circle(INT32 xc, INT32 yc, INT32 r, UINT32 colour);
 #if CIRCLE_OPTIMISATION
 STATIC BOOLEAN draw_full_circle(INT32 xc, INT32 yc, INT32 r, UINT32 colour);
 #endif
-#if FONT_SUPPORT
-STATIC EFI_STATUS put_string(TEXT_CONFIG *TxtCfg, UINT16 *string);
-#endif
+#define FONT_WIDTH(FontData) FontData[14]
+#define FONT_HEIGHT(FontData) FontData[15]
+STATIC CONST UINT8 *get_font_data(FONT Font);
+STATIC CONST UINT8 *get_char_bitmap(CONST UINT8 *FontData, UINT16 Code);
+STATIC VOID init_text_config(TEXT_CONFIG *TxtCfg, INT32 x, INT32 y, INT32 Width, INT32 Height, UINT32 FgColour, UINT32 BgColour, FONT Font);
+STATIC VOID default_text_config(TEXT_CONFIG *TxtCfg, INT32 Width, INT32 Height);
+STATIC EFI_STATUS put_string(RENDER_BUFFER *RenBuf, TEXT_CONFIG *TxtCfgOvr, UINT16 *string);
 
 STATIC BOOLEAN Initialised = FALSE;
 #define RENBUF_SIG 0x52425546UL   // "RBUF"
@@ -73,9 +70,7 @@ STATIC UINT32                           gCurrMode = 0;
 STATIC RENDER_BUFFER                    gFrameBuffer = {0};
 STATIC RENDER_BUFFER                    *gCurrRenBuf = NULL;
 STATIC BOOLEAN                          gRenderToScreen = TRUE;
-#if FONT_SUPPORT
-STATIC TEXT_CONFIG                      gFBTxtCfg = { 0 };
-#endif
+
 
 // macros
 #define SWAP(T, x, y) \
@@ -89,10 +84,12 @@ STATIC TEXT_CONFIG                      gFBTxtCfg = { 0 };
 
 EFI_STATUS InitGraphics(VOID)
 {
+    DbgPrint(DL_INFO, "%a()\n", __func__);
+
     EFI_STATUS Status = gBS->LocateProtocol(&gEfiGraphicsOutputProtocolGuid, NULL, (void**) &gGop);
     if (EFI_ERROR(Status)){
-        DbgPrint(DL_ERROR, "GOP missing!\n");
-        goto error_exit;
+        DbgPrint(DL_ERROR, "%a(), GOP missing => %a\n", __func__, EFIStatusToStr(Status));
+        return Status;
     }
     // remember original graphics mode as takes precidence over that required for text
     gOrigGfxMode = gGop->Mode->Mode;
@@ -100,48 +97,28 @@ EFI_STATUS InitGraphics(VOID)
     init_globals();
     Initialised = TRUE;
 
-#if DEVELOPMENT_MODE
-    SetClipping(0, 0, GetHorRes() - DEV_WINDOW_WIDTH - 1, GetVerRes() - 1);
-    CreateTextBox(&gDebugTxtCfg, GetHorRes() - DEV_WINDOW_WIDTH, 0, DEV_WINDOW_WIDTH, GetVerRes(), WHITE, BLUE, FONT7x14);
-    ClearTextBox(&gDebugTxtCfg);
-#endif
-
-error_exit:
     return Status;
 }
 
 STATIC VOID init_globals(VOID)
 {
+    DbgPrint(DL_INFO, "%a()\n", __func__);
+
     gCurrMode = gGop->Mode->Mode;
-    gFrameBuffer.Sig = RENBUF_SIG;
-    gFrameBuffer.HorRes = gGop->Mode->Info->HorizontalResolution;
-    gFrameBuffer.VerRes = gGop->Mode->Info->VerticalResolution;
-    gFrameBuffer.PixPerScnLn = gGop->Mode->Info->PixelsPerScanLine;
-    gFrameBuffer.PixelData = (UINT32 *)gGop->Mode->FrameBufferBase;
-    reset_clipping(&gFrameBuffer);
+    init_renbuf(&gFrameBuffer, gGop->Mode->Info->HorizontalResolution, gGop->Mode->Info->VerticalResolution, gGop->Mode->Info->PixelsPerScanLine, (UINT32 *)gGop->Mode->FrameBufferBase);
+    default_text_config(&gFrameBuffer.TxtCfg, gFrameBuffer.HorRes, gFrameBuffer.VerRes);
+
+    // Default to screen
     gCurrRenBuf = &gFrameBuffer;
     gRenderToScreen = TRUE;
-#if FONT_SUPPORT
-    // Text Config
-    gFBTxtCfg.RenBuf = &gFrameBuffer;
-    gFBTxtCfg.X0 = 0;
-    gFBTxtCfg.Y0 = 0;
-    gFBTxtCfg.X1 = gFrameBuffer.HorRes - 1;
-    gFBTxtCfg.Y1 = gFrameBuffer.VerRes - 1;
-    gFBTxtCfg.Font = FONT10x20;
-    gFBTxtCfg.CurrX = gFBTxtCfg.X0;
-    gFBTxtCfg.CurrY = gFBTxtCfg.Y0;
-    gFBTxtCfg.FgColour = WHITE;
-    gFBTxtCfg.BgColour = BLACK;
-    gFBTxtCfg.BgColourEnabled = TRUE;
-    gFBTxtCfg.LineWrapEnabled = TRUE;
-    gFBTxtCfg.ScrollEnabled = TRUE;
-#endif
 }
 
 EFI_STATUS RestoreConsole(VOID)
 {
+    DbgPrint(DL_INFO, "%a()\n", __func__);
+
     if (!Initialised) {
+        DbgPrint(DL_ERROR, "%a(), GraphicsLib not initialised => EFI_NOT_READY\n", __func__);
         return EFI_NOT_READY;
     }
     // set original graphics mode
@@ -152,7 +129,10 @@ EFI_STATUS RestoreConsole(VOID)
 
 EFI_STATUS SetGraphicsMode(UINT32 Mode)
 {
+    DbgPrint(DL_INFO, "%a(Mode=%u)\n", __func__, Mode);
+
     if (!Initialised) {
+        DbgPrint(DL_ERROR, "%a(), GraphicsLib not initialised => EFI_NOT_READY\n", __func__);
         return EFI_NOT_READY;
     }
     EFI_STATUS Status = gGop->SetMode(gGop, Mode);
@@ -165,7 +145,10 @@ EFI_STATUS SetGraphicsMode(UINT32 Mode)
 
 EFI_STATUS GetGraphicsMode(UINT32 *Mode)
 {
+    DbgPrint(DL_INFO, "%a(Mode=0x%p)\n", __func__, Mode);
+
     if (!Initialised) {
+        DbgPrint(DL_ERROR, "%a(), GraphicsLib not initialised => EFI_NOT_READY\n", __func__);
         return EFI_NOT_READY;
     }
     if (!Mode) {
@@ -177,7 +160,10 @@ EFI_STATUS GetGraphicsMode(UINT32 *Mode)
 
 EFI_STATUS SetDisplayResolution(UINT32 HorRes, UINT32 VerRes)
 {
+    DbgPrint(DL_INFO, "%a(HorRes=%u, VerRes=%u)\n", __func__, HorRes, VerRes);
+
     if (!Initialised) {
+        DbgPrint(DL_ERROR, "%a(), GraphicsLib not initialised => EFI_NOT_READY\n", __func__);
         return EFI_NOT_READY;
     }
     for (UINT32 i = 0; i < gGop->Mode->MaxMode; ++i) {
@@ -200,7 +186,10 @@ EFI_STATUS SetDisplayResolution(UINT32 HorRes, UINT32 VerRes)
 
 UINT32 NumGraphicsModes(VOID)
 {
+    DbgPrint(DL_INFO, "%a()\n", __func__);
+
     if (!Initialised) {
+        DbgPrint(DL_ERROR, "%a(), GraphicsLib not initialised => EFI_NOT_READY\n", __func__);
         return 0;
     }
     return gGop->Mode->MaxMode;
@@ -208,7 +197,10 @@ UINT32 NumGraphicsModes(VOID)
 
 EFI_STATUS QueryGraphicsMode(UINT32 Mode, UINT32 *HorRes, UINT32 *VerRes)
 {
+    DbgPrint(DL_INFO, "%a(Mode=%u, HorRes=0x%p, VerRes=0x%p)\n", __func__, Mode, HorRes, VerRes);
+
     if (!Initialised) {
+        DbgPrint(DL_ERROR, "%a(), GraphicsLib not initialised => EFI_NOT_READY\n", __func__);
         return EFI_NOT_READY;
     }
     EFI_GRAPHICS_OUTPUT_MODE_INFORMATION* Info;
@@ -229,7 +221,10 @@ EFI_STATUS QueryGraphicsMode(UINT32 Mode, UINT32 *HorRes, UINT32 *VerRes)
 
 INT32 GetFBHorRes(VOID)
 {
+    DbgPrint(DL_INFO, "%a()\n", __func__);
+
     if (!Initialised) {
+        DbgPrint(DL_ERROR, "%a(), GraphicsLib not initialised => EFI_NOT_READY\n", __func__);
         return 0;
     }
     return gFrameBuffer.HorRes;
@@ -237,59 +232,67 @@ INT32 GetFBHorRes(VOID)
 
 INT32 GetFBVerRes(VOID)
 {
+    DbgPrint(DL_INFO, "%a()\n", __func__);
+
     if (!Initialised) {
+        DbgPrint(DL_ERROR, "%a(), GraphicsLib not initialised => EFI_NOT_READY\n", __func__);
         return 0;
     }
     return gFrameBuffer.VerRes;
 }
 
+STATIC VOID init_renbuf(RENDER_BUFFER *RenBuf, INT32 HorRes, INT32 VerRes, INT32 PixPerScnLn, UINT32 *PixelData)
+{
+    DbgPrint(DL_INFO, "%a(RenBuf=0x%p, HorRes=%d, VerRes=%d, PixPerScnLn=%d, PixelData=0x%p)\n", __func__, RenBuf, HorRes, VerRes, PixPerScnLn, PixelData);
+
+    RenBuf->Sig = RENBUF_SIG;
+    RenBuf->HorRes = HorRes;
+    RenBuf->VerRes = VerRes;
+    RenBuf->PixPerScnLn = PixPerScnLn;
+    reset_clipping(RenBuf);
+    RenBuf->PixelData = PixelData;
+}
+
 EFI_STATUS CreateRenderBuffer(RENDER_BUFFER *RenBuf, UINT32 Width, UINT32 Height)
 {
-    EFI_STATUS Status = EFI_SUCCESS;
+    DbgPrint(DL_INFO, "%a(RenBuf=0x%p, Width=%u, Height=%d)\n", __func__, RenBuf, Width, Height);
 
     if (!Initialised) {
-        Status = EFI_NOT_READY;
-        goto error_exit;
+        DbgPrint(DL_ERROR, "%a(), GraphicsLib not initialised => EFI_NOT_READY\n", __func__);
+        return EFI_NOT_READY;
     }
     if (!RenBuf) {
-        Status = EFI_INVALID_PARAMETER;
-        goto error_exit;
+        DbgPrint(DL_ERROR, "%a(), RenBuf=NULL => EFI_INVALID_PARAMETER\n", __func__);
+        return EFI_INVALID_PARAMETER;
     }
     // allocate buffer
     UINTN Memsize = Width*Height*sizeof(UINT32); // or sizeof(EFI_GRAPHICS_OUTPUT_BLT_PIXEL) ?????
     UINT32 *Buff = AllocateZeroPool(Memsize);
     if (Buff == NULL) {
+        DbgPrint(DL_ERROR, "%a(), memory allocation error => EFI_OUT_OF_RESOURCES\n", __func__);
         return EFI_OUT_OF_RESOURCES;
     }
-    // fill in rest of RenBuf
-    RenBuf->Sig = RENBUF_SIG;
-    RenBuf->HorRes = Width;
-    RenBuf->VerRes = Height;
-    RenBuf->PixPerScnLn = Width;
-    reset_clipping(RenBuf);
-    RenBuf->PixelData = Buff;
-error_exit:
-    if (EFI_ERROR(Status)) {
-        DbgPrint(DL_ERROR, "%a() returned %a\n", __func__, EFIStatusToStr(Status));
-    }
-    return Status;
+    init_renbuf(RenBuf, Width, Height, Width, Buff);
+    default_text_config(&RenBuf->TxtCfg, Width, Height);
+
+    return EFI_SUCCESS;
 }
 
 EFI_STATUS DestroyRenderBuffer(RENDER_BUFFER *RenBuf)
 {
-    EFI_STATUS Status = EFI_SUCCESS;
+    DbgPrint(DL_INFO, "%a(RenBuf=0x%p)\n", __func__, RenBuf);
 
     if (!Initialised) {
-        Status = EFI_NOT_READY;
-        goto error_exit;
+        DbgPrint(DL_ERROR, "%a(), GraphicsLib not initialised => EFI_NOT_READY\n", __func__);
+        return EFI_NOT_READY;
     }
     if (!RenBuf) {
-        Status = EFI_INVALID_PARAMETER;
-        goto error_exit;
+        DbgPrint(DL_ERROR, "%a(), RenBuf=NULL => EFI_INVALID_PARAMETER\n", __func__);
+        return EFI_INVALID_PARAMETER;
     }
     if (RenBuf->Sig != RENBUF_SIG) {
-        Status = EFI_INVALID_PARAMETER;
-        goto error_exit;
+        DbgPrint(DL_ERROR, "%a(), Invalid Render Buffer => EFI_INVALID_PARAMETER\n", __func__);
+        return EFI_INVALID_PARAMETER;
     }
     if (RenBuf->PixelData) {
         FreePool(RenBuf->PixelData);
@@ -302,70 +305,61 @@ EFI_STATUS DestroyRenderBuffer(RENDER_BUFFER *RenBuf)
         gRenderToScreen = TRUE;
     }
     ZeroMem(RenBuf, sizeof(RENDER_BUFFER));
-error_exit:
-    if (EFI_ERROR(Status)) {
-        DbgPrint(DL_ERROR, "%a() returned %a\n", __func__, EFIStatusToStr(Status));
-    }
-    return Status;
+
+    return EFI_SUCCESS;
 }
 
 EFI_STATUS SetRenderBuffer(RENDER_BUFFER *RenBuf)
 {
-    EFI_STATUS Status = EFI_SUCCESS;
+    DbgPrint(DL_INFO, "%a(RenBuf=0x%p)\n", __func__, RenBuf);
 
     if (!Initialised) {
-        Status = EFI_NOT_READY;
-        goto error_exit;
+        DbgPrint(DL_ERROR, "%a(), GraphicsLib not initialised => EFI_NOT_READY\n", __func__);
+        return EFI_NOT_READY;
     }
     if (!RenBuf) {
-        Status = EFI_INVALID_PARAMETER;
-        goto error_exit;
+        DbgPrint(DL_ERROR, "%a(), RenBuf=NULL => EFI_INVALID_PARAMETER\n", __func__);
+        return EFI_INVALID_PARAMETER;
     }
     if (RenBuf->Sig != RENBUF_SIG) {
-        Status = EFI_INVALID_PARAMETER;
-        goto error_exit;
+        DbgPrint(DL_ERROR, "%a(), Invalid Render Buffer => EFI_INVALID_PARAMETER\n", __func__);
+        return EFI_INVALID_PARAMETER;
     }
     gCurrRenBuf = RenBuf;
     gRenderToScreen = FALSE;
-error_exit:
-    if (EFI_ERROR(Status)) {
-        DbgPrint(DL_ERROR, "%a() returned %a\n", __func__, EFIStatusToStr(Status));
-    }
-    return Status;
+
+    return EFI_SUCCESS;
 }
 
 EFI_STATUS SetScreenRender(VOID)
 {
-    EFI_STATUS Status = EFI_SUCCESS;
+    DbgPrint(DL_INFO, "%a()\n", __func__);
 
     if (!Initialised) {
-        Status = EFI_NOT_READY;
-        goto error_exit;
+        DbgPrint(DL_ERROR, "%a(), GraphicsLib not initialised => EFI_NOT_READY\n", __func__);
+        return EFI_NOT_READY;
     }
     gCurrRenBuf = &gFrameBuffer;
     gRenderToScreen = TRUE;
-error_exit:
-    if (EFI_ERROR(Status)) {
-        DbgPrint(DL_ERROR, "%a() returned %a\n", __func__, EFIStatusToStr(Status));
-    }
-    return Status;
+
+    return EFI_SUCCESS;
 }
 
 EFI_STATUS DisplayRenderBuffer(RENDER_BUFFER *RenBuf, INT32 x, INT32 y)
 {
-    EFI_STATUS Status = EFI_SUCCESS;
+    DbgPrint(DL_INFO, "%a(RenBuf=0x%p, x=%d, y=%d)\n", __func__, RenBuf, x, y);
 
     if (!Initialised) {
-        Status = EFI_NOT_READY;
-        goto error_exit;
+        DbgPrint(DL_ERROR, "%a(), GraphicsLib not initialised => EFI_NOT_READY\n", __func__);
+        return EFI_NOT_READY;
     }
     if (!RenBuf) {
-        Status = EFI_INVALID_PARAMETER;
-        goto error_exit;
+        DbgPrint(DL_ERROR, "%a(), RenBuf=NULL => EFI_INVALID_PARAMETER\n", __func__);
+        return EFI_INVALID_PARAMETER;
     }
     if (RenBuf->Sig != RENBUF_SIG) {
-        Status = EFI_INVALID_PARAMETER;
-        goto error_exit;
+        DbgPrint(DL_ERROR, "%a(), Invalid Render Buffer => EFI_INVALID_PARAMETER\n", __func__);
+        return EFI_INVALID_PARAMETER;
     }
     // (x,y) source in render buffer
     INT32 src_x = 0;
@@ -379,7 +373,8 @@ EFI_STATUS DisplayRenderBuffer(RENDER_BUFFER *RenBuf, INT32 x, INT32 y)
 
     // check if visible
     if (dst_yb < gFrameBuffer.ClipY0 || dst_yt > gFrameBuffer.ClipY1 || dst_xr < gFrameBuffer.ClipX0 || dst_xl > gFrameBuffer.ClipX1) {
-        goto error_exit;
+        DbgPrint(DL_WARN, "%a(), not visible => EFI_NOT_READY\n", __func__);
+        return EFI_NOT_READY;
     }
 
     // clip source image
@@ -402,21 +397,20 @@ EFI_STATUS DisplayRenderBuffer(RENDER_BUFFER *RenBuf, INT32 x, INT32 y)
         height -= (dst_yb - gFrameBuffer.ClipY1);
     }
 
-    Status = gGop->Blt(gGop, (EFI_GRAPHICS_OUTPUT_BLT_PIXEL *)RenBuf->PixelData, EfiBltBufferToVideo, src_x, src_y, dst_xl, dst_yt, width, height, sizeof(UINT32)*RenBuf->PixPerScnLn);
+    EFI_STATUS Status = gGop->Blt(gGop, (EFI_GRAPHICS_OUTPUT_BLT_PIXEL *)RenBuf->PixelData, EfiBltBufferToVideo, src_x, src_y, dst_xl, dst_yt, width, height, sizeof(UINT32)*RenBuf->PixPerScnLn);
     if (EFI_ERROR(Status)) {
-        DbgPrint(DL_ERROR, "%a(): Blt() returned %a\n", __func__, EFIStatusToStr(Status));
+        DbgPrint(DL_ERROR, "%a(), Blt() => %a\n", __func__, EFIStatusToStr(Status));
     }
     
-error_exit:
-    if (EFI_ERROR(Status)) {
-        DbgPrint(DL_ERROR, "%a() returned %a\n", __func__, EFIStatusToStr(Status));
-    }
     return Status;
 }
 
 UINT32 GetHorRes(VOID)
 {
+    DbgPrint(DL_INFO, "%a()\n", __func__);
+
     if (!Initialised) {
+        DbgPrint(DL_ERROR, "%a(), GraphicsLib not initialised\n", __func__);
         return 0;
     }
     return gCurrRenBuf->HorRes;
@@ -424,7 +418,10 @@ UINT32 GetHorRes(VOID)
 
 UINT32 GetVerRes(VOID)
 {
+    DbgPrint(DL_INFO, "%a()\n", __func__);
+
     if (!Initialised) {
+        DbgPrint(DL_ERROR, "%a(), GraphicsLib not initialised\n", __func__);
         return 0;
     }
     return gCurrRenBuf->VerRes;
@@ -432,12 +429,14 @@ UINT32 GetVerRes(VOID)
 
 VOID SetClipping(INT32 x0, INT32 y0, INT32 x1, INT32 y1)
 {
-    DbgPrint(DL_INFO, "%a()\n", __func__);
+    DbgPrint(DL_INFO, "%a(x0=%d, y0=%d, x1=%d, y1=%d)\n", __func__, x0, y0, x1, y1);
     set_clipping(gCurrRenBuf, x0, y0, x1, y1);
 }
 
 VOID set_clipping(RENDER_BUFFER *RenBuf, INT32 x0, INT32 y0, INT32 x1, INT32 y1)
 {
+    DbgPrint(DL_INFO, "%a(RenBuf=0x%p, x0=%d, y0=%d, x1=%d, y1=%d)\n", __func__, x0, y0, x1, y1);
+
     // determine top-left bottom-right
     if (x0 < x1) {
         RenBuf->ClipX0 = x0;
@@ -479,11 +478,14 @@ VOID set_clipping(RENDER_BUFFER *RenBuf, INT32 x0, INT32 y0, INT32 x1, INT32 y1)
 VOID ResetClipping(VOID)
 {
     DbgPrint(DL_INFO, "%a()\n", __func__);
+
     reset_clipping(gCurrRenBuf);
 }
 
 STATIC VOID reset_clipping(RENDER_BUFFER *RenBuf)
 {
+    DbgPrint(DL_INFO, "%a(RenBuf=0x%p)\n", __func__, RenBuf);
+
     RenBuf->ClipX0 = 0;
     RenBuf->ClipY0 = 0;
     RenBuf->ClipX1 = RenBuf->HorRes - 1;
@@ -492,11 +494,15 @@ STATIC VOID reset_clipping(RENDER_BUFFER *RenBuf)
 
 BOOLEAN Clipped(VOID)
 {
+    DbgPrint(DL_INFO, "%a()\n", __func__);
+
     return clipped(gCurrRenBuf);
 }
 
 BOOLEAN clipped(RENDER_BUFFER *RenBuf)
 {
+    DbgPrint(DL_INFO, "%a(RenBuf=0x%p)\n", __func__, RenBuf);
+
     if (RenBuf->ClipX0 != 0 || RenBuf->ClipY0 != 0 || RenBuf->ClipX1 != RenBuf->HorRes - 1 || RenBuf->ClipY1 != RenBuf->VerRes - 1) {
         return TRUE;
     }
@@ -505,7 +511,10 @@ BOOLEAN clipped(RENDER_BUFFER *RenBuf)
 
 VOID ClearScreen(UINT32 colour)
 {
+    DbgPrint(DL_INFO, "%a(colour=0x%08X)\n", __func__, colour);
+
     if (!Initialised) {
+        DbgPrint(DL_ERROR, "%a(), GraphicsLib not initialised", __func__);
         return;
     }
     if (gRenderToScreen) {
@@ -524,13 +533,16 @@ VOID ClearScreen(UINT32 colour)
         }
     }
     // reset text position
-    gFBTxtCfg.CurrX = gFBTxtCfg.X0;
-    gFBTxtCfg.CurrY = gFBTxtCfg.Y0;
+    gCurrRenBuf->TxtCfg.CurrX = gCurrRenBuf->TxtCfg.X0;
+    gCurrRenBuf->TxtCfg.CurrY = gCurrRenBuf->TxtCfg.Y0;
 }
 
 VOID ClearClipWindow(UINT32 colour)
 {
+    DbgPrint(DL_INFO, "%a(colour=0x%08X)\n", __func__, colour);
+
     if (!Initialised) {
+        DbgPrint(DL_ERROR, "%a(), GraphicsLib not initialised\n", __func__);
         return;
     }
     UINT32 *ptr = gCurrRenBuf->PixelData + gCurrRenBuf->ClipX0 + (gCurrRenBuf->ClipY0 * gCurrRenBuf->PixPerScnLn);
@@ -544,7 +556,10 @@ VOID ClearClipWindow(UINT32 colour)
 
 VOID PutPixel(INT32 x, INT32 y, UINT32 colour)
 {
+    DbgPrint(DL_INFO, "%a(x=%d, y=%d, colour=0x%08X)\n", __func__, x, y, colour);
+
     if (!Initialised) {
+        DbgPrint(DL_ERROR, "%a(), GraphicsLib not initialised\n", __func__);
         return;
     }
     // clip pixel
@@ -562,7 +577,10 @@ VOID PutPixel(INT32 x, INT32 y, UINT32 colour)
 
 UINT32 GetPixel(INT32 x, INT32 y)
 {
+    DbgPrint(DL_INFO, "%a(x=%d, y=%d)\n", __func__, x, y);
+
     if (!Initialised) {
+        DbgPrint(DL_ERROR, "%a(), GraphicsLib not initialised => 0\n", __func__);
         return 0;
     }
     // clip pixel
@@ -578,6 +596,8 @@ UINT32 GetPixel(INT32 x, INT32 y)
 
 STATIC VOID draw_hline(INT32 x, INT32 y, INT32 width, UINT32 colour)
 {
+    DbgPrint(DL_INFO, "%a(x=%d, y=%d, width=%d, colour=0x%08X)\n", __func__, x, y, width, colour);
+
     // clip line
     INT32 x1 = x + width - 1;
     if (y < gCurrRenBuf->ClipY0 || y > gCurrRenBuf->ClipY1 || x1 < gCurrRenBuf->ClipX0 || x > gCurrRenBuf->ClipX1) {
@@ -598,7 +618,10 @@ STATIC VOID draw_hline(INT32 x, INT32 y, INT32 width, UINT32 colour)
 
 VOID DrawHLine(INT32 x, INT32 y, INT32 width, UINT32 colour)
 {
-    if (!Initialised){
+    DbgPrint(DL_INFO, "%a(x=%d, y=%d, width=%d, colour=0x%08X)\n", __func__, x, y, width, colour);
+
+    if (!Initialised) {
+        DbgPrint(DL_ERROR, "%a(), GraphicsLib not initialised => 0\n", __func__);
         return;
     }
     EDK2SIM_GFX_BEGIN;
@@ -608,6 +631,8 @@ VOID DrawHLine(INT32 x, INT32 y, INT32 width, UINT32 colour)
 
 VOID DrawHLine2(INT32 x0, INT32 x1, INT32 y, UINT32 colour)
 {
+    DbgPrint(DL_INFO, "%a(x0=%d, x0=%d, y=%d, colour=0x%08X)\n", __func__, x0, x1, colour);
+
     if (x1 < x0) {
         SWAP(INT32, x0, x1);
     }
@@ -616,7 +641,10 @@ VOID DrawHLine2(INT32 x0, INT32 x1, INT32 y, UINT32 colour)
 
 VOID DrawVLine(INT32 x, INT32 y, INT32 height, UINT32 colour)
 {
+    DbgPrint(DL_INFO, "%a(x=%d, y=%d, height=%d, colour=0x%08X)\n", __func__, x, y, height, colour);
+
     if (!Initialised) {
+        DbgPrint(DL_ERROR, "%a(), GraphicsLib not initialised => 0\n", __func__);
         return;
     }
     // clip line
@@ -643,7 +671,10 @@ VOID DrawVLine(INT32 x, INT32 y, INT32 height, UINT32 colour)
 
 VOID DrawLine(INT32 x0, INT32 y0, INT32 x1, INT32 y1, UINT32 colour)
 {
+    DbgPrint(DL_INFO, "%a(x0=%d, y0=%d, x1=%d, y1=%d, colour=0x%08X)\n", __func__, x0, y0, x1, y1, colour);
+
     if (!Initialised) {
+        DbgPrint(DL_ERROR, "%a(), GraphicsLib not initialised => 0\n", __func__);
         return;
     }
     if ( !(x0 < gCurrRenBuf->ClipX0 && x1 < gCurrRenBuf->ClipX0) && !(x0 > gCurrRenBuf->ClipX1 && x1 > gCurrRenBuf->ClipX1) ) {
@@ -693,6 +724,8 @@ VOID DrawLine(INT32 x0, INT32 y0, INT32 x1, INT32 y1, UINT32 colour)
 
 STATIC VOID draw_line(INT32 x0, INT32 y0, INT32 x1, INT32 y1, UINT32 colour)
 {
+    DbgPrint(DL_INFO, "%a(x0=%d, y0=%d, x1=%d, y1=%d, colour=0x%08X)\n", __func__, x0, y0, x1, y1, colour);
+
     INT32 dx = ABS(x1 - x0);
     INT32 sx = x0 < x1 ? 1 : -1;
     INT32 dy = -ABS(y1 - y0);
@@ -729,8 +762,11 @@ STATIC VOID draw_line(INT32 x0, INT32 y0, INT32 x1, INT32 y1, UINT32 colour)
 
 VOID DrawTriangle(INT32 x0, INT32 y0, INT32 x1, INT32 y1, INT32 x2, INT32 y2, UINT32 colour)
 {
+    DbgPrint(DL_INFO, "%a(x0=%d, y0=%d, x1=%d, y1=%d, x2=%d, y2=%d colour=0x%08X)\n", __func__, x0, y0, x1, y1, x2, y2, colour);
+
     if (!Initialised) {
-        return;    
+        DbgPrint(DL_ERROR, "%a(), GraphicsLib not initialised => 0\n", __func__);
+        return;
     }
     // sort the vertices, y0 < y1 < y2
     // same order as for a filled triangle
@@ -755,8 +791,11 @@ VOID DrawTriangle(INT32 x0, INT32 y0, INT32 x1, INT32 y1, INT32 x2, INT32 y2, UI
 // TODO: full clipping before rendering
 VOID DrawFillTriangle(INT32 x0, INT32 y0, INT32 x1, INT32 y1, INT32 x2, INT32 y2, UINT32 colour)
 {
+    DbgPrint(DL_INFO, "%a(x0=%d, y0=%d, x1=%d, y1=%d, x2=%d, y2=%d colour=0x%08X)\n", __func__, x0, y0, x1, y1, x2, y2, colour);
+
     if (!Initialised) {
-        return;    
+        DbgPrint(DL_ERROR, "%a(), GraphicsLib not initialised => 0\n", __func__);
+        return;
     }
     // sort the vertices, y0 < y1 < y2
     if (y0 > y1) {
@@ -914,7 +953,6 @@ VOID DrawFillTriangle(INT32 x0, INT32 y0, INT32 x1, INT32 y1, INT32 x2, INT32 y2
             INT32 xl = (Aminx < Bminx) ? Aminx : Bminx;
             INT32 xr = (Amaxx > Bmaxx) ? Amaxx : Bmaxx;
             INT32 y = currentY;
-            DEVPRINT((&gDebugTxtCfg, L"[%d,%d],%d\n", xl, xr, y));
             if (y < gCurrRenBuf->ClipY0 || y > gCurrRenBuf->ClipY1 || xr < gCurrRenBuf->ClipX0 || xl > gCurrRenBuf->ClipX1) {
                 goto skip;  // off screen
             }
@@ -949,8 +987,11 @@ VOID DrawFillTriangle(INT32 x0, INT32 y0, INT32 x1, INT32 y1, INT32 x2, INT32 y2
 
 VOID DrawRectangle(INT32 x0, INT32 y0, INT32 x1, INT32 y1, UINT32 colour)
 {
+    DbgPrint(DL_INFO, "%a(x0=%d, y0=%d, x1=%d, y1=%d, colour=0x%08X)\n", __func__, x0, y0, x1, y1, colour);
+
     if (!Initialised) {
-        return;    
+        DbgPrint(DL_ERROR, "%a(), GraphicsLib not initialised => 0\n", __func__);
+        return;
     }
     // determine top-left and bottom-right
     INT32 xl, xr, yt, yb;
@@ -1037,8 +1078,11 @@ VOID DrawRectangle(INT32 x0, INT32 y0, INT32 x1, INT32 y1, UINT32 colour)
 
 VOID DrawFillRectangle(INT32 x0, INT32 y0, INT32 x1, INT32 y1, UINT32 colour)
 {
+    DbgPrint(DL_INFO, "%a(x0=%d, y0=%d, x1=%d, y1=%d, colour=0x%08X)\n", __func__, x0, y0, x1, y1, colour);
+
     if (!Initialised) {
-        return;    
+        DbgPrint(DL_ERROR, "%a(), GraphicsLib not initialised => 0\n", __func__);
+        return;
     }
     // determine top-left and bottom-right
     INT32 xl, xr, yt, yb;
@@ -1094,8 +1138,11 @@ VOID DrawFillRectangle(INT32 x0, INT32 y0, INT32 x1, INT32 y1, UINT32 colour)
 
 VOID DrawCircle(INT32 xc, INT32 yc, INT32 r, UINT32 colour)
 {
+    DbgPrint(DL_INFO, "%a(xc=%d, yc=%d, r=%d, colour=0x%08X)\n", __func__, xc, yc, r, colour);
+
     if (!Initialised) {
-        return;    
+        DbgPrint(DL_ERROR, "%a(), GraphicsLib not initialised => 0\n", __func__);
+        return;
     }
 #if CIRCLE_OPTIMISATION
     if (draw_full_circle(xc, yc, r, colour)) {
@@ -1109,6 +1156,8 @@ VOID DrawCircle(INT32 xc, INT32 yc, INT32 r, UINT32 colour)
 
 STATIC VOID draw_part_circle(INT32 xc, INT32 yc, INT32 r, UINT32 colour)
 {
+    DbgPrint(DL_INFO, "%a(xc=%d, yc=%d, r=%d, colour=0x%08X)\n", __func__, xc, yc, r, colour);
+
     INT32 x = 0;
     INT32 y = r;
     INT32 d = 3 - 2 * r;
@@ -1152,6 +1201,8 @@ STATIC BOOLEAN draw_full_circle(INT32 xc, INT32 yc, INT32 r, UINT32 colour)
     INT32 x = 0;
     INT32 y = r;
     INT32 d = 3 - 2 * r;
+
+    DbgPrint(DL_INFO, "%a(xc=%d, yc=%d, r=%d, colour=0x%08X)\n", __func__, xc, yc, r, colour);
 
     if (gCurrRenBuf->ClipX0 + r > xc || gCurrRenBuf->ClipX1 < xc + r || gCurrRenBuf->ClipY0 + r > yc || gCurrRenBuf->ClipY1 < yc + r) {
         // circle is clipped so exit
@@ -1228,7 +1279,10 @@ STATIC BOOLEAN draw_full_circle(INT32 xc, INT32 yc, INT32 r, UINT32 colour)
 
 VOID DrawFillCircle(INT32 xc, INT32 yc, INT32 r, UINT32 colour)
 {
+    DbgPrint(DL_INFO, "%a(xc=%d, yc=%d, r=%d, colour=0x%08X)\n", __func__, xc, yc, r, colour);
+
     if (!Initialised) {
+        DbgPrint(DL_ERROR, "%a(), GraphicsLib not initialised => 0\n", __func__);
         return;
     }
     INT32 x = 0;
@@ -1253,13 +1307,123 @@ VOID DrawFillCircle(INT32 xc, INT32 yc, INT32 r, UINT32 colour)
     EDK2SIM_GFX_END;
 }
 
-#if FONT_SUPPORT
-
-#define STRING_SIZE 256
-
-UINTN EFIAPI GPrint(TEXT_CONFIG *TxtCfg, CHAR16 *sFormat, ...)
+STATIC CONST UINT8 *get_font_data(FONT Font)
 {
+    switch (Font) {
+    case FONT5x7:   return font5x7_ISO8859_1;
+    case FONT5x8:   return font5x8_ISO8859_1;
+    case FONT6x9:   return font6x9_ISO8859_1;
+    case FONT6x10:  return font6x10_ISO8859_1;
+    case FONT6x12:  return font6x12_ISO8859_1;
+    case FONT6x13:  return font6x13_ISO8859_1;
+    case FONT6x13B: return font6x13B_ISO8859_1;
+    case FONT6x13O: return font6x13O_ISO8859_1;
+    case FONT7x13B: return font7x13B_ISO8859_1;
+    case FONT7x13:  return font7x13_ISO8859_1;
+    case FONT7x13O: return font7x13O_ISO8859_1;
+    case FONT7x14B: return font7x14B_ISO8859_1;
+    case FONT7x14:  return font7x14_ISO8859_1;
+    case FONT8x13:  return font8x13_ISO8859_1;
+    case FONT8x13B: return font8x13B_ISO8859_1;
+    case FONT8x13O: return font8x13O_ISO8859_1;
+    case FONT9x15:  return font9x15_ISO8859_1;
+    case FONT9x15B: return font9x15B_ISO8859_1;
+    case FONT9x18:  return font9x18_ISO8859_1;
+    case FONT9x18B: return font9x18B_ISO8859_1;
+    default:
+    case FONT10x20: return font10x20_ISO8859_1;
+    }
+}
+
+/*
+ * See "Using FONTX font files"
+ * http://elm-chan.org/docs/dosv/fontx_e.html
+ */
+STATIC CONST UINT8 *get_char_bitmap (  /* Returns pointer to the font image (NULL:invalid code) */
+    CONST UINT8 *FontData,              /* Pointer to the FONTX file on the memory */
+    UINT16 Code                         /* Character code */
+)
+{
+    UINTN nc, bc, sb, eb;
+    UINT32 fsz;
+    CONST UINT8 *cblk;
+
+    fsz = (FontData[14] + 7) / 8 * FontData[15];  /* Get font size */
+
+    if (FontData[16] == 0) {  /* Single byte code font */
+        if (Code < 0x100) return &FontData[17 + Code * fsz];
+    } else {              /* Double byte code font */
+        cblk = &FontData[18]; nc = 0;  /* Code block table */
+        bc = FontData[17];
+        while (bc--) {
+            sb = cblk[0] + cblk[1] * 0x100;  /* Get range of the code block */
+            eb = cblk[2] + cblk[3] * 0x100;
+            if (Code >= sb && Code <= eb) {  /* Check if in the code block */
+                nc += Code - sb;             /* Number of codes from top of the block */
+//                Print(L"Pos: %d\n", 18 + 4 * FontData[17] + nc * fsz);
+                return &FontData[18 + 4 * FontData[17] + nc * fsz];
+            }
+            nc += eb - sb + 1;     /* Number of codes in the previous blocks */
+            cblk += 4;             /* Next code block */
+        }
+    }
+
+    return 0;   /* Invalid code */
+}
+
+VOID PrintFontInfo(CONST UINT8 *FontData)
+{
+    CHAR8 FileSig[7] = {0};
+    AsciiStrnCpyS(FileSig, 7, (CONST CHAR8 *)&FontData[0], 6);
+    CHAR8 FontName[9] = {0};
+    AsciiStrnCpyS(FontName, 9, (CONST CHAR8 *)&FontData[6], 8);
+    UINT8 CodeFlag = FontData[16];
+   
+    Print(L"File Sig   : %a\n", FileSig);
+    Print(L"Font Name  : %a\n", FontName);
+    Print(L"Font Width : %u\n", FONT_WIDTH(FontData));
+    Print(L"Font Height: %u\n", FONT_HEIGHT(FontData));
+    Print(L"Code Flag  : %u\n", CodeFlag);
+}
+
+STATIC VOID init_text_config(TEXT_CONFIG *TxtCfg, INT32 x, INT32 y, INT32 Width, INT32 Height, UINT32 FgColour, UINT32 BgColour, FONT Font)
+{
+    DbgPrint(DL_INFO, "%a(TxtCfg=0x%p, x=%d, y=%d, Width=%d, Height=%d, FgColour=0x%08X, BgColour=0x%08X, Font=%u)\n", __func__, TxtCfg, x, y, Width, Height, FgColour, BgColour, Font);
+
+    TxtCfg->X0 = x;
+    TxtCfg->Y0 = y;
+    TxtCfg->X1 = x + Width - 1;
+    TxtCfg->Y1 = y + Height - 1;
+    TxtCfg->Font = Font;
+    TxtCfg->FontData = get_font_data(Font);
+    TxtCfg->CurrX = TxtCfg->X0;
+    TxtCfg->CurrY = TxtCfg->Y0;
+    TxtCfg->FgColour = FgColour;
+    TxtCfg->BgColour = BgColour;
+    TxtCfg->BgColourEnabled = TRUE;
+    TxtCfg->LineWrapEnabled = TRUE;
+    TxtCfg->ScrollEnabled = TRUE;
+}
+
+STATIC VOID default_text_config(TEXT_CONFIG *TxtCfg, INT32 Width, INT32 Height)
+{
+    DbgPrint(DL_INFO, "%a(TxtCfg=0x%p, Width=%d, Height=%d)\n", __func__, TxtCfg, Width, Height);
+
+    init_text_config(TxtCfg, 0, 0, Width, Height, DEFAULT_FG_COLOUR, DEFAULT_BG_COLOUR, DEFAULT_FONT);
+}
+
+#define STRING_SIZE 1024
+
+UINTN EFIAPI GPrint(CHAR16 *sFormat, ...)
+{
+    DbgPrint(DL_INFO, "%a(sFormat=0x%p ...)\n", __func__, sFormat);
+
     if (!Initialised) {
+        DbgPrint(DL_ERROR, "%a(), GraphicsLib not initialised => 0\n", __func__);
+        return 0;
+    }
+    if (!sFormat) {
+        DbgPrint(DL_WARN, "%a(), sFormat=NULL => 0\n", __func__);
         return 0;
     }
     CHAR16 String[STRING_SIZE];
@@ -1267,22 +1431,60 @@ UINTN EFIAPI GPrint(TEXT_CONFIG *TxtCfg, CHAR16 *sFormat, ...)
     VA_START(vl, sFormat);
     UINTN Length = UnicodeVSPrint(String, STRING_SIZE, sFormat, vl);
     VA_END(vl);
-    put_string(TxtCfg ? TxtCfg : &gFBTxtCfg, String);
+    EFI_STATUS Status = put_string(gCurrRenBuf, NULL, String);
+    if (EFI_ERROR(Status)) {
+        DbgPrint(DL_INFO, "%a(), put_string() => %a => 0\n", __func__, EFIStatusToStr(Status));
+        return 0;
+    }
+
     return Length;
 }
 
-EFI_STATUS GPutString(INT32 x, INT32 y, UINT16 *string, UINT32 FgColour, UINT32 BgColour, BOOLEAN BgColourEnabled, FONT Font)
+UINTN EFIAPI GPrintTextBox(TEXT_BOX *TxtBox, CHAR16 *sFormat, ...)
 {
+    DbgPrint(DL_INFO, "%a(TxtBox=0x%p, sFormat=0x%p ...)\n", __func__, TxtBox, sFormat);
+
     if (!Initialised) {
+        DbgPrint(DL_ERROR, "%a(), GraphicsLib not initialised => 0\n", __func__);
+        return 0;
+    }
+    if (!TxtBox) {
+        DbgPrint(DL_ERROR, "%a(), TxtBox=NULL => 0\n", __func__);
+        return 0;
+    }
+    if (!sFormat) {
+        DbgPrint(DL_WARN, "%a(), sFormat=NULL => 0\n", __func__);
+        return 0;
+    }
+    CHAR16 String[STRING_SIZE];
+    VA_LIST vl;
+    VA_START(vl, sFormat);
+    UINTN Length = UnicodeVSPrint(String, STRING_SIZE, sFormat, vl);
+    VA_END(vl);
+    EFI_STATUS Status = put_string(TxtBox->RenBuf, &TxtBox->TxtCfg, String);
+    if (EFI_ERROR(Status)) {
+        DbgPrint(DL_INFO, "%a(), put_string() => %a => 0\n", __func__, EFIStatusToStr(Status));
+        return 0;
+    }
+
+    return Length;
+}
+
+EFI_STATUS EFIAPI GPutString(INT32 x, INT32 y, UINT32 FgColour, UINT32 BgColour, BOOLEAN BgColourEnabled, FONT Font, CHAR16 *sFormat, ...)
+{
+    DbgPrint(DL_INFO, "%a(x=%d, y=%d, FgColour=0x%08X, BgColour=0x%08X, BgColourEnabled=%u, Font=%u, sFormat=0x%p)\n", __func__, x, y, FgColour, BgColour, BgColourEnabled, Font, sFormat);
+
+    if (!Initialised) {
+        DbgPrint(DL_ERROR, "%a(), GraphicsLib not initialised => EFI_NOT_READY\n", __func__);
         return EFI_NOT_READY;
     }
     TEXT_CONFIG TxtCfg = {
-        .RenBuf = gCurrRenBuf,
         .X0 = gCurrRenBuf->ClipX0,
         .Y0 = gCurrRenBuf->ClipY0,
         .X1 = gCurrRenBuf->ClipX1,
         .Y1 = gCurrRenBuf->ClipY1,
         .Font = Font,
+        .FontData = get_font_data(Font),
         .CurrX = x,
         .CurrY = y,  
         .FgColour = FgColour,
@@ -1291,41 +1493,58 @@ EFI_STATUS GPutString(INT32 x, INT32 y, UINT16 *string, UINT32 FgColour, UINT32 
         .LineWrapEnabled = FALSE,
         .ScrollEnabled = FALSE
     };
-    DbgPrint(DL_INFO, "x=%d, y=%d, X0=%d, Y0=%d, X1=%d, Y1=%d\n", x, y, TxtCfg.X0, TxtCfg.Y0, TxtCfg.X1, TxtCfg.Y1);
-    return put_string(&TxtCfg, string);
+    CHAR16 String[STRING_SIZE];
+    VA_LIST vl;
+    VA_START(vl, sFormat);
+    UnicodeVSPrint(String, STRING_SIZE, sFormat, vl);
+    VA_END(vl);
+    EFI_STATUS Status = put_string(gCurrRenBuf, &TxtCfg, String);
+    if (EFI_ERROR(Status)) {
+        DbgPrint(DL_WARN, "%a(), put_string() => %a\n", __func__, EFIStatusToStr(Status));
+        return Status;
+    }
+
+    return EFI_SUCCESS;
 }
 
-STATIC EFI_STATUS put_string(TEXT_CONFIG *TxtCfg, UINT16 *string)
+STATIC EFI_STATUS put_string(RENDER_BUFFER *RenBuf, TEXT_CONFIG *TxtCfgOvr, UINT16 *string)
 {
-    if (!TxtCfg || !string || string[0] == L'\0') {
-        return 0;
+    DbgPrint(DL_INFO, "%a(RenBuf=0x%p, TxtCfgOvr=0x%p, string=0x%p ...)\n", __func__, RenBuf, TxtCfgOvr, string);
+
+    if (!string) {
+        DbgPrint(DL_ERROR, "%a(), string=NULL => EFI_INVALID_PARAMETER\n", __func__);
+        return EFI_INVALID_PARAMETER;
     }
-    if (!TxtCfg->RenBuf) {
-        return 0; // no associated render buffer
+    if (string[0] == L'\0') {
+        DbgPrint(DL_INFO, "%a(), empty string => EFI_SUCCESS\n", __func__);
+        return EFI_SUCCESS;
     }
-    if (TxtCfg->RenBuf != gCurrRenBuf) {
-        return 0; // current render buffer is not associated with this text box
-    }
+    TEXT_CONFIG *TxtCfg = TxtCfgOvr ? TxtCfgOvr : &RenBuf->TxtCfg;
+
     INT32 x = TxtCfg->CurrX;
     INT32 y = TxtCfg->CurrY;
 
     INT32 HorRes = TxtCfg->X1 - TxtCfg->X0 + 1;
     INT32 VerRes = TxtCfg->Y1 - TxtCfg->Y0 + 1;
 
-    INT32 FontWidth = GetFontWidth(TxtCfg->Font);
-    INT32 FontHeight = GetFontHeight(TxtCfg->Font);
+    INT32 FontWidth = FONT_WIDTH(TxtCfg->FontData);
+    INT32 FontHeight = FONT_HEIGHT(TxtCfg->FontData);
 
     UINTN numChars = StrLen(string);
     if (y < TxtCfg->Y0) {
+        DbgPrint(DL_WARN, "%a(), off top => EFI_NOT_READY\n", __func__);
         return EFI_NOT_READY; // off top 
     }
     if (y + FontHeight - 1 > TxtCfg->Y1) {
+        DbgPrint(DL_WARN, "%a(). off bottom => EFI_NOT_READY\n", __func__);
         return EFI_NOT_READY; // off bottom 
     }
     if (x+(FontWidth * numChars) - 1 < TxtCfg->X0) {
+        DbgPrint(DL_WARN, "%a(), off left => EFI_NOT_READY\n", __func__);
         return EFI_NOT_READY; // off left
     }
     if ( (x > TxtCfg->X1) && !TxtCfg->LineWrapEnabled) {
+        DbgPrint(DL_WARN, "%a(), off right and line wrap not enabled => EFI_NOT_READY\n", __func__);
         return EFI_NOT_READY; // off right and line wrap not enabled
     }
     INT32 i = 0;
@@ -1335,7 +1554,7 @@ STATIC EFI_STATUS put_string(TEXT_CONFIG *TxtCfg, UINT16 *string)
         x += (i * FontWidth);
     }
 
-    UINT32 *char_rbptr = gCurrRenBuf->PixelData + x + (y * gCurrRenBuf->PixPerScnLn);
+    UINT32 *char_rbptr = RenBuf->PixelData + x + (y * RenBuf->PixPerScnLn);
 
     EDK2SIM_GFX_BEGIN;
     while (TRUE) {
@@ -1349,16 +1568,17 @@ STATIC EFI_STATUS put_string(TEXT_CONFIG *TxtCfg, UINT16 *string)
 
         BOOLEAN DoLineWrap = FALSE;
 
-        // char off right of screen
-        if ( (x + FontWidth > TxtCfg->X1) && TxtCfg->LineWrapEnabled) {
-            DoLineWrap = TRUE;
-        }
-
-        // carriage return
+        // do carriage return check before checking if char off right of screen
         if (code == L'\r' || DoLineWrap) {
+            // carriage return
             // move to the beginning of the line without advancing to the next line
             x = TxtCfg->X0;
-            char_rbptr = gCurrRenBuf->PixelData + x + (y * gCurrRenBuf->PixPerScnLn);
+            char_rbptr = RenBuf->PixelData + x + (y * RenBuf->PixPerScnLn);
+        } else if ( (x+FontWidth-1 > TxtCfg->X1) && TxtCfg->LineWrapEnabled) {
+            // char off right of screen
+            DoLineWrap = TRUE;
+            x = TxtCfg->X0;
+            char_rbptr = RenBuf->PixelData + x + (y * RenBuf->PixPerScnLn);
         }
 
         // line feed
@@ -1369,7 +1589,7 @@ STATIC EFI_STATUS put_string(TEXT_CONFIG *TxtCfg, UINT16 *string)
                 INT32 diff = y + 2*FontHeight-1 - TxtCfg->Y1;
                 y = TxtCfg->Y0 + VerRes - FontHeight;
                 // scroll
-                if (gRenderToScreen) {
+                if (RenBuf == &gFrameBuffer) {
                     EFI_STATUS Status = gGop->Blt(gGop,
                                                     (EFI_GRAPHICS_OUTPUT_BLT_PIXEL *)NULL, 
                                                     EfiBltVideoToVideo, 
@@ -1377,21 +1597,21 @@ STATIC EFI_STATUS put_string(TEXT_CONFIG *TxtCfg, UINT16 *string)
                                                     TxtCfg->X0, TxtCfg->Y0, 
                                                     HorRes, VerRes - diff, 0);                
                     if (EFI_ERROR(Status)) {
-                        DbgPrint(DL_ERROR, "%a(): Blt() returned %a\n", __func__, EFIStatusToStr(Status));
+                        DbgPrint(DL_ERROR, "%a(), Blt() => %a\n", __func__, EFIStatusToStr(Status));
                     }
                 } else {
-                    UINT32 *dstptr = gCurrRenBuf->PixelData + TxtCfg->X0 + (TxtCfg->Y0 * gCurrRenBuf->PixPerScnLn);
-                    UINT32 *srcptr = dstptr + (diff * gCurrRenBuf->PixPerScnLn);
+                    UINT32 *dstptr = RenBuf->PixelData + TxtCfg->X0 + (TxtCfg->Y0 * RenBuf->PixPerScnLn);
+                    UINT32 *srcptr = dstptr + (diff * RenBuf->PixPerScnLn);
                     UINTN height = VerRes - diff;
                     while (height--) {
                         CopyMem(dstptr, srcptr, HorRes * sizeof(UINT32));
-                        dstptr += gCurrRenBuf->PixPerScnLn;
-                        srcptr += gCurrRenBuf->PixPerScnLn;
+                        dstptr += RenBuf->PixPerScnLn;
+                        srcptr += RenBuf->PixPerScnLn;
                     }
                 }
                 // blank scrolled area
                 UINT32 colour = TxtCfg->BgColour;
-                if (gRenderToScreen) {
+                if (RenBuf == &gFrameBuffer) {
                     EFI_STATUS Status = gGop->Blt(gGop, 
                                             (EFI_GRAPHICS_OUTPUT_BLT_PIXEL *)&colour, 
                                             EfiBltVideoFill, 
@@ -1399,26 +1619,26 @@ STATIC EFI_STATUS put_string(TEXT_CONFIG *TxtCfg, UINT16 *string)
                                             TxtCfg->X0, TxtCfg->Y0 + VerRes - FontHeight, 
                                             HorRes, FontHeight, 0);
                     if (EFI_ERROR(Status)) {
-                        DbgPrint(DL_ERROR, "%a(): Blt() returned %a\n", __func__, EFIStatusToStr(Status));
+                        DbgPrint(DL_ERROR, "%a(), Blt() => %a\n", __func__, EFIStatusToStr(Status));
                     }
                 } else {
-                    UINT32 *ptr = gCurrRenBuf->PixelData + TxtCfg->X0 + ((TxtCfg->Y0 + VerRes - FontHeight) * gCurrRenBuf->PixPerScnLn);
+                    UINT32 *ptr = RenBuf->PixelData + TxtCfg->X0 + ((TxtCfg->Y0 + VerRes - FontHeight) * RenBuf->PixPerScnLn);
                     UINTN height = FontHeight;
                     while (height--) {
                         SetMem32(ptr, HorRes * sizeof(UINT32), colour);
-                        ptr += gCurrRenBuf->PixPerScnLn;
+                        ptr += RenBuf->PixPerScnLn;
                     }
                 }
-                char_rbptr += ((FontHeight - diff) * gCurrRenBuf->PixPerScnLn);
+                char_rbptr += ((FontHeight - diff) * RenBuf->PixPerScnLn);
             } else {
                 y += FontHeight;
-                char_rbptr += (FontHeight * gCurrRenBuf->PixPerScnLn);
+                char_rbptr += (FontHeight * RenBuf->PixPerScnLn);
             }
         }
 
         // printable character
         if (code != L'\r' && code != L'\n') {
-            CONST UINT8 *CharData = GetCharBitmap(TxtCfg->Font, code);
+            CONST UINT8 *CharData = get_char_bitmap(TxtCfg->FontData, code);
             if ( CharData && (x >= TxtCfg->X0) && (x + FontWidth - 1 <= TxtCfg->X1) ){
                 // char on screen
                 UINT32 *lh_rbptr = char_rbptr;
@@ -1438,7 +1658,7 @@ STATIC EFI_STATUS put_string(TEXT_CONFIG *TxtCfg, UINT16 *string)
                         }  
                         Data <<= 1;
                     }
-                    lh_rbptr += gCurrRenBuf->PixPerScnLn;
+                    lh_rbptr += RenBuf->PixPerScnLn;
                 }
                 char_rbptr += FontWidth;
                 x += FontWidth;
@@ -1458,116 +1678,233 @@ STATIC EFI_STATUS put_string(TEXT_CONFIG *TxtCfg, UINT16 *string)
 
 VOID EnableTextBackground(BOOLEAN State)
 {
-    EnableTextBoxBackground(&gFBTxtCfg, State);
+    DbgPrint(DL_INFO, "%a(State=%u)\n", __func__, State);
+
+    if (!Initialised) {
+        DbgPrint(DL_ERROR, "%a(), GraphicsLib not initialised\n", __func__);
+        return;
+    }
+    gCurrRenBuf->TxtCfg.BgColourEnabled = State;
 }
 
-VOID EnableTextBoxBackground(TEXT_CONFIG *TxtCfg, BOOLEAN State)
+VOID EnableTextBoxBackground(TEXT_BOX *TxtBox, BOOLEAN State)
 {
-    TxtCfg->BgColourEnabled = State;
+    DbgPrint(DL_INFO, "%a(TxtBox=0x%p, State=%u)\n", __func__, TxtBox, State);
+
+    if (!Initialised) {
+        DbgPrint(DL_ERROR, "%a(), GraphicsLib not initialised\n", __func__);
+        return;
+    }
+    if (!TxtBox) {
+        DbgPrint(DL_ERROR, "%a(), TxtBox=NULL\n", __func__);
+        return;
+    }
+    TxtBox->TxtCfg.BgColourEnabled = State;
 }
 
 VOID SetTextForeground(UINT32 colour)
 {
-    SetTextBoxForeground(&gFBTxtCfg, colour);
+    DbgPrint(DL_INFO, "%a(colour=0x%08X)\n", __func__, colour);
+
+    if (!Initialised) {
+        DbgPrint(DL_ERROR, "%a(), GraphicsLib not initialised\n", __func__);
+        return;
+    }
+    gCurrRenBuf->TxtCfg.FgColour = colour;
 }
 
-VOID SetTextBoxForeground(TEXT_CONFIG *TxtCfg, UINT32 colour)
+VOID SetTextBoxForeground(TEXT_BOX *TxtBox, UINT32 colour)
 {
-    TxtCfg->FgColour = colour;
+    DbgPrint(DL_INFO, "%a(TxtBox=0x%p, colour=0x%08X)\n", __func__, TxtBox, colour);
+
+    if (!Initialised) {
+        DbgPrint(DL_ERROR, "%a(), GraphicsLib not initialised\n", __func__);
+        return;
+    }
+    if (!TxtBox) {
+        DbgPrint(DL_ERROR, "%a(), TxtBox=NULL\n", __func__);
+        return;
+    }
+    TxtBox->TxtCfg.FgColour = colour;
 }
 
 VOID SetTextBackground(UINT32 colour)
 {
-    SetTextBoxBackground(&gFBTxtCfg, colour);
+    DbgPrint(DL_INFO, "%a(colour=0x%08X)\n", __func__, colour);
+
+    if (!Initialised) {
+        DbgPrint(DL_ERROR, "%a(), GraphicsLib not initialised\n", __func__);
+        return;
+    }
+    gCurrRenBuf->TxtCfg.BgColour = colour;
 }
 
-VOID SetTextBoxBackground(TEXT_CONFIG *TxtCfg, UINT32 colour)
+VOID SetTextBoxBackground(TEXT_BOX *TxtBox, UINT32 colour)
 {
-    TxtCfg->BgColour = colour;
+    DbgPrint(DL_INFO, "%a(TxtBox=0x%p, colour=0x%08X)\n", __func__, TxtBox, colour);
+
+    if (!Initialised) {
+        DbgPrint(DL_ERROR, "%a(), GraphicsLib not initialised\n", __func__);
+        return;
+    }
+    if (!TxtBox) {
+        DbgPrint(DL_ERROR, "%a(), TxtBox=NULL\n", __func__);
+        return;
+    }
+    TxtBox->TxtCfg.BgColour = colour;
 }
 
 VOID SetFont(FONT font)
 {
-    SetTextBoxFont(&gFBTxtCfg, font);
-}
+    DbgPrint(DL_INFO, "%a(Font=%u)\n", __func__, font);
 
-VOID SetTextBoxFont(TEXT_CONFIG *TxtCfg, FONT font)
-{
-    TxtCfg->Font = font;
-}
-
-EFI_STATUS CreateTextBox(TEXT_CONFIG *TxtCfg, INT32 x, INT32 y, INT32 Width, INT32 Height, UINT32 FgColour, UINT32 BgColour, FONT Font)
-{
     if (!Initialised) {
+        DbgPrint(DL_ERROR, "%a(), GraphicsLib not initialised\n", __func__);
+        return;
+    }
+    gCurrRenBuf->TxtCfg.Font = font;
+    gCurrRenBuf->TxtCfg.FontData = get_font_data(font);
+}
+
+CONST CHAR8 *GetFontName(FONT Font)
+{
+    DbgPrint(DL_INFO, "%a(Font=%u)\n", __func__, Font);
+
+#define NAME(FONTID) case FONTID: return #FONTID;
+    switch (Font) {
+        NAME(FONT5x7)
+        NAME(FONT5x8)
+        NAME(FONT6x9)
+        NAME(FONT6x10)
+        NAME(FONT6x12)
+        NAME(FONT6x13)
+        NAME(FONT6x13B)
+        NAME(FONT6x13O)
+        NAME(FONT7x13)
+        NAME(FONT7x13B)
+        NAME(FONT7x13O)
+        NAME(FONT7x14)
+        NAME(FONT7x14B)
+        NAME(FONT8x13)
+        NAME(FONT8x13B)
+        NAME(FONT8x13O)
+        NAME(FONT9x15)
+        NAME(FONT9x15B)
+        NAME(FONT9x18)
+        NAME(FONT9x18B)
+        NAME(FONT10x20)
+        default:
+            break;
+    }
+    return "NOFONT";
+#undef NAME
+}
+
+
+UINT8 GetFontWidth(FONT Font)
+{
+    DbgPrint(DL_INFO, "%a(Font=%u)\n", __func__, Font);
+
+    return FONT_WIDTH(get_font_data(Font));
+}
+
+UINT8 GetFontHeight(FONT Font)
+{
+    DbgPrint(DL_INFO, "%a(Font=%u)\n", __func__, Font);
+
+    return FONT_HEIGHT(get_font_data(Font));
+}
+
+VOID SetTextBoxFont(TEXT_BOX *TxtBox, FONT Font)
+{
+    DbgPrint(DL_INFO, "%a(TxtBox=0x%p, Font=%u)\n", __func__, TxtBox, Font);
+
+    if (!Initialised) {
+        DbgPrint(DL_ERROR, "%a(), GraphicsLib not initialised\n", __func__);
+        return;
+    }
+    if (!TxtBox) {
+        DbgPrint(DL_ERROR, "%a(), TxtBox=NULL\n", __func__);
+        return;
+    }
+    TxtBox->TxtCfg.Font = Font;
+    TxtBox->TxtCfg.FontData = get_font_data(Font);
+}
+
+EFI_STATUS CreateTextBox(TEXT_BOX *TxtBox, RENDER_BUFFER *RenBuf, INT32 x, INT32 y, INT32 Width, INT32 Height, UINT32 FgColour, UINT32 BgColour, FONT Font)
+{
+    DbgPrint(DL_INFO, "%a(TxtBox=0x%p, RenBuf=0x%p, x=%d, y=%d, Width=%d, Height=%d, FgColour=0x%08X, BgColour=0x%08X, Font=%u)\n", __func__, TxtBox, RenBuf, x, y, Width, Height, FgColour, BgColour, Font);
+
+    if (!Initialised) {
+        DbgPrint(DL_ERROR, "%a(), GraphicsLib not initialised => EFI_NOT_READY\n", __func__);
         return EFI_NOT_READY;
     }
-    if (y + Height - 1 < 0 || y > gCurrRenBuf->VerRes - 1 || x + Width - 1 < 0 || x > gCurrRenBuf->HorRes - 1) {
-        ZeroMem(TxtCfg, sizeof(TEXT_CONFIG));
+    if (!TxtBox) {
+        DbgPrint(DL_ERROR, "%a(), TxtBox=NULL => EFI_INVALID_PARAMETER\n", __func__);
         return EFI_INVALID_PARAMETER;
     }
-    TxtCfg->RenBuf = gCurrRenBuf;   
+
+    // determine render buffer targeted (NULL == Screen)
+    TxtBox->RenBuf = RenBuf ? RenBuf : &gFrameBuffer;
+
+    if (TxtBox->RenBuf->Sig != RENBUF_SIG) {
+        DbgPrint(DL_ERROR, "%a(), Invalid Render Buffer => EFI_INVALID_PARAMETER\n", __func__);
+        return EFI_INVALID_PARAMETER;
+    }
+
+    if (y + Height - 1 < 0 || y > TxtBox->RenBuf->VerRes - 1 || x + Width - 1 < 0 || x > TxtBox->RenBuf->HorRes - 1) {
+        ZeroMem(TxtBox, sizeof(TEXT_BOX));
+        DbgPrint(DL_ERROR, "%a(): Invalid size\n", __func__);
+        return EFI_INVALID_PARAMETER;
+    }
     if (x < 0) x = 0;
-    if (x + Width > gCurrRenBuf->HorRes) Width = gCurrRenBuf->HorRes - x;
+    if (x + Width > TxtBox->RenBuf->HorRes) Width = TxtBox->RenBuf->HorRes - x;
     if (y < 0) y = 0;
-    if (y + Height > gCurrRenBuf->VerRes) Height = gCurrRenBuf->VerRes - y;
+    if (y + Height > TxtBox->RenBuf->VerRes) Height = TxtBox->RenBuf->VerRes - y;
 
-    TxtCfg->X0 = x;
-    TxtCfg->Y0 = y;
-    TxtCfg->X1 = x + Width - 1;
-    TxtCfg->Y1 = y + Height - 1;;
+    init_text_config(&TxtBox->TxtCfg, x, y, Width, Height, FgColour, BgColour, Font);
 
-    TxtCfg->Font = Font;;
-    TxtCfg->CurrX = TxtCfg->X0;
-    TxtCfg->CurrY = TxtCfg->Y0;
-    TxtCfg->FgColour = FgColour;
-    TxtCfg->BgColour = BgColour;
-    TxtCfg->BgColourEnabled = TRUE;
-    TxtCfg->LineWrapEnabled = TRUE;
-    TxtCfg->ScrollEnabled = TRUE;
+    ClearTextBox(TxtBox);
 
     return EFI_SUCCESS;
 }
 
-VOID ClearTextBox(TEXT_CONFIG *TxtCfg)
+EFI_STATUS ClearTextBox(TEXT_BOX *TxtBox)
 {
+    DbgPrint(DL_INFO, "%a(TxtBox=0x%p)\n", __func__, TxtBox);
+
     if (!Initialised) {
-        return;
+        DbgPrint(DL_ERROR, "%a(), GraphicsLib not initialised => EFI_NOT_READY\n", __func__);
+        return EFI_NOT_READY;
     }
-    if (!TxtCfg->RenBuf) {
-        return; // no associated render buffer
+    if (TxtBox->RenBuf->Sig != RENBUF_SIG) {
+        DbgPrint(DL_ERROR, "%a(), Invalid Render Buffer => EFI_INVALID_PARAMETER\n", __func__);
+        return EFI_INVALID_PARAMETER;
     }
-    if (TxtCfg->RenBuf != gCurrRenBuf) {
-        return; // current render buffer is not associated with this text box
-    }
-    UINT32 HorRes = TxtCfg->X1 - TxtCfg->X0 + 1;
-    UINT32 VerRes = TxtCfg->Y1 - TxtCfg->Y0 + 1;
-    UINT32 colour = TxtCfg->BgColour;
-    if (gRenderToScreen) {
+    UINT32 HorRes = TxtBox->TxtCfg.X1 - TxtBox->TxtCfg.X0 + 1;
+    UINT32 VerRes = TxtBox->TxtCfg.Y1 - TxtBox->TxtCfg.Y0 + 1;
+    UINT32 colour = TxtBox->TxtCfg.BgColour;
+    if (TxtBox->RenBuf == &gFrameBuffer) {
         EFI_STATUS Status = gGop->Blt(gGop, 
                                 (EFI_GRAPHICS_OUTPUT_BLT_PIXEL *)&colour, 
                                 EfiBltVideoFill, 
                                 0, 0, 
-                                TxtCfg->X0, TxtCfg->Y0, 
+                                TxtBox->TxtCfg.X0, TxtBox->TxtCfg.Y0, 
                                 HorRes, VerRes, 0);                
         if (EFI_ERROR(Status)) {
-            DbgPrint(DL_ERROR, "%a(): Blt() returned %a\n", __func__, EFIStatusToStr(Status));
+            DbgPrint(DL_ERROR, "%a(), Blt() => %a\n", __func__, EFIStatusToStr(Status));
         }
     } else {
-        UINT32 *ptr = gCurrRenBuf->PixelData + TxtCfg->X0 + (TxtCfg->Y0 * gCurrRenBuf->PixPerScnLn);
+        UINT32 *ptr = TxtBox->RenBuf->PixelData + TxtBox->TxtCfg.X0 + (TxtBox->TxtCfg.Y0 * TxtBox->RenBuf->PixPerScnLn);
         UINTN height = VerRes;
         while (height--) {
             SetMem32(ptr, HorRes * sizeof(UINT32), colour);
-            ptr += gCurrRenBuf->PixPerScnLn;
+            ptr += TxtBox->RenBuf->PixPerScnLn;
         }
     }
+
+    return EFI_SUCCESS;
 }
-
-#endif // FONT_SUPPORT
-
-//-------------------------------------------------------------------------
-// WIP
-//-------------------------------------------------------------------------
-
 
 //-------------------------------------------------------------------------
 // DEBUG
